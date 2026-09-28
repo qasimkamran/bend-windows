@@ -75,11 +75,14 @@ static void file_read_at_call(IoWork* w) {
     && SetFilePointerEx(h, zero, &old, FILE_CURRENT);
   bool ok = saved && SetFilePointerEx(h, offset, NULL, FILE_BEGIN)
     && ReadFile(h, w->data, w->word, &n, NULL);
+  DWORD error = ok ? ERROR_SUCCESS
+    : h == INVALID_HANDLE_VALUE ? ERROR_INVALID_HANDLE : GetLastError();
   if (saved) {
     SetFilePointerEx(h, old, NULL, FILE_BEGIN);
   }
-  if (!ok) errno = EIO;
-  w->size = io_sys_end(w, ok ? n : -1);
+  if (!ok) errno = error == ERROR_ACCESS_DENIED || error == ERROR_INVALID_HANDLE
+    ? EBADF : EIO;
+  w->size = io_sys_end(w, ok ? (ssize_t)n : -1);
   pthread_mutex_unlock(&io_file_pos_lock);
 #else
   w->size = io_sys_end(w, pread(fd, w->data, w->word, (off_t)w->made));
