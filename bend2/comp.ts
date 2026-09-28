@@ -5181,7 +5181,13 @@ static void gpu_shape(int units) {
 static bool gpu_probe(void) {
   int       managed = 0;
   CUcontext ctx;
+#ifdef _WIN32
+  if (getenv("CUDA_DEVICE_MAX_CONNECTIONS") == NULL) {
+    _putenv_s("CUDA_DEVICE_MAX_CONNECTIONS", "1");
+  }
+#else
   setenv("CUDA_DEVICE_MAX_CONNECTIONS", "1", 0);
+#endif
   if (cuInit(0) == CUDA_SUCCESS && cuDeviceGet(&gpu_dev, 0) == CUDA_SUCCESS) {
     cuDeviceGetAttribute(&managed,
       CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS, gpu_dev);
@@ -5259,6 +5265,28 @@ static u64 gpu_span(void) {
 
 static void gpu_load(u64 bytes) {
   const char* path = gpu_path();
+#ifdef _WIN32
+  FILE* in = fopen(path, "rb");
+  u64   key = 0;
+  long  len = -1;
+  char* bin = NULL;
+  if (in != NULL && fseek(in, 0, SEEK_END) == 0
+    && (len = ftell(in)) > 8 && fseek(in, 0, SEEK_SET) == 0) {
+    bin = malloc((size_t)len);
+    if (bin == NULL || fread(bin, 1, (size_t)len, in) != (size_t)len) {
+      free(bin);
+      bin = NULL;
+    }
+  }
+  if (in != NULL) fclose(in);
+  if (bin != NULL) memcpy(&key, bin, 8);
+  if (bin == NULL || key != gpu_hash()
+    || cuModuleLoadData(&gpu_lib, bin + 8) != CUDA_SUCCESS) {
+    gpu_note(path);
+    gpu_make(path);
+  }
+  free(bin);
+#else
   int         fd   = open(path, O_RDONLY);
   struct stat st   = { 0 };
   u64         key  = 0;
@@ -5272,6 +5300,7 @@ static void gpu_load(u64 bytes) {
     gpu_note(path);
     gpu_make(path);
   }
+#endif
   if (cuModuleGetFunction(&gpu_pso, gpu_lib, "bend_dev") != CUDA_SUCCESS) {
     err_fail("cannot load the GPU program");
   }
