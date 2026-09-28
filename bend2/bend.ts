@@ -949,6 +949,24 @@ async function book_file(book: Book, file: string, spn?: Span): Promise<string> 
   return fs.realpathSync(file);
 }
 
+function book_posix(file: string): string {
+  if (process.platform !== "win32") {
+    return file;
+  }
+  const at = file.replaceAll("\\", "/");
+  return at.startsWith("//") ? "/UNC" + at.slice(1)
+    : /^[A-Za-z]:\//.test(at) ? "/" + at : at;
+}
+
+function book_native(file: string): string {
+  if (process.platform !== "win32") {
+    return file;
+  }
+  return /^\/[A-Za-z]:\//.test(file) ? file.slice(1)
+    : file.startsWith("/UNC/") ? "\\\\" + file.slice(5).replaceAll("/", "\\")
+    : file;
+}
+
 export async function book_load(book: Book, file: string, ns: string, seen: Map<string, string | null>, spn?: Span, root?: string): Promise<number> {
   const real = await book_file(book, file, spn);
   if (seen.has(real)) {
@@ -958,7 +976,8 @@ export async function book_load(book: Book, file: string, ns: string, seen: Map<
     return book.order.length;
   }
   seen.set(real, null);
-  const dir   = real.slice(0, real.lastIndexOf("/") + 1);
+  const at    = book_posix(real);
+  const dir   = at.slice(0, at.lastIndexOf("/") + 1);
   const top   = root ?? dir;
   const text  = fs.readFileSync(real, "utf8");
   const lines = text.split("\n");
@@ -999,18 +1018,22 @@ export async function book_load(book: Book, file: string, ns: string, seen: Map<
     if (!ok(as.replace(/^\.\//, "").slice(0, -5), hub(as))) {
       throw bad();
     }
-    const got = await book_file(book, hub(as) ? BEND_LIB + "/" + rel : path.posix.resolve(dir, rel), sp);
-    const lib = fs.existsSync(BEND_LIB) ? fs.realpathSync(BEND_LIB) + "/" : "\0";
-    const sub = (got.startsWith(lib) ? got.slice(lib.length)
-      : path.posix.relative(top, got)).replace(/\.bend$/, "");
-    if (!ok(sub, got.startsWith(lib)) || (hub(ns) && !got.startsWith(lib))) {
+    const got = await book_file(book, hub(as) ? BEND_LIB + "/" + rel
+      : book_native(path.posix.resolve(dir, rel)), sp);
+    const got_at = book_posix(got);
+    const lib = fs.existsSync(BEND_LIB)
+      ? book_posix(fs.realpathSync(BEND_LIB)) + "/" : "\0";
+    const in_lib = got_at.startsWith(lib);
+    const sub = (in_lib ? got_at.slice(lib.length)
+      : path.posix.relative(top, got_at)).replace(/\.bend$/, "");
+    if (!ok(sub, in_lib) || (hub(ns) && !in_lib)) {
       throw bad();
     }
     al[m[2]] = sub;
     await book_load(book, got, sub, seen, sp, top);
   }
   const n0 = book.order.length;
-  parse_book(book, dir, body.join("\n"), ns, al);
+  parse_book(book, book_native(dir), body.join("\n"), ns, al);
   if (real === BASE_BEND) {
     for (const k of book.order.slice(n0)) {
       book.tlds[k].b = true;
