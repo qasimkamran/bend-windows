@@ -440,7 +440,9 @@ function cli_build(bin: string, file: string): void {
     ? ["-x", "objective-c", "-fobjc-arc", "-fmodules"] : [];
   const libs  = [["X11", "X11"], ["alsa", "asound"]].flatMap(([h, l]) =>
     !mac && !win && c.includes("#include <" + h + "/") ? ["-l" + l] : []);
-  const cpu = [...objc, "-std=c11", "-O3", file, "-lpthread", "-lm",
+  const cpu = [...objc, "-std=c11", "-O3",
+    ...win ? ["-I" + path.join(import.meta.dir, "effs")] : [],
+    file, "-lpthread", "-lm",
     ...win ? ["-lws2_32", "-lbcrypt", "-lwinmm", "-luser32", "-lgdi32"]
       : [], ...libs,
     "-o", path.resolve(bin)];
