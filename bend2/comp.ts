@@ -3688,6 +3688,9 @@ static u32             pool_tick;
 static u32             pool_done;
 static pthread_mutex_t pool_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  pool_wake = PTHREAD_COND_INITIALIZER;
+#ifdef _WIN32
+static pthread_mutex_t io_file_pos_lock = PTHREAD_MUTEX_INITIALIZER;
+#endif
 
 #if BEND_METAL || BEND_CUDA
 #pragma clang diagnostic ignored "-Wc23-extensions"

@@ -3,7 +3,13 @@
 
 static void file_read_call(IoWork* w) {
   int fd = (int)w->hand;
+#ifdef _WIN32
+  pthread_mutex_lock(&io_file_pos_lock);
+#endif
   w->size = io_sys_end(w, read(fd, w->data, w->word));
+#ifdef _WIN32
+  pthread_mutex_unlock(&io_file_pos_lock);
+#endif
 }
 
 static Term file_read_start(Term file, u64 max, IoWork* w,
@@ -61,6 +67,7 @@ static void __attribute__((constructor)) file_read_bytes_use(void) {
 static void file_read_at_call(IoWork* w) {
   int fd = (int)w->hand;
 #ifdef _WIN32
+  pthread_mutex_lock(&io_file_pos_lock);
   HANDLE h = (HANDLE)_get_osfhandle(fd);
   LARGE_INTEGER zero = { 0 }, old = { 0 }, offset = { .QuadPart = (u64)w->made };
   DWORD n = 0;
@@ -73,6 +80,7 @@ static void file_read_at_call(IoWork* w) {
   }
   if (!ok) errno = EIO;
   w->size = io_sys_end(w, ok ? n : -1);
+  pthread_mutex_unlock(&io_file_pos_lock);
 #else
   w->size = io_sys_end(w, pread(fd, w->data, w->word, (off_t)w->made));
 #endif
