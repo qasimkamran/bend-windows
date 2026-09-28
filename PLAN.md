@@ -29,6 +29,8 @@ been runtime-validated.
 - A fork-specific Windows preview release and PowerShell installer. The README
   documents installation and removal. This is not integration with the
   upstream Bend distribution/site.
+- Installer Preview 2 fixes architecture detection in Windows PowerShell 5.1;
+  validated under PowerShell 5.1 with a disposable install and `bend version`.
 - Native Windows CPU/JS and focused effect checks, plus Windows Lean 4.34.0
   `--verdict` checks. Linux behavior was compared for available focused cases.
 
@@ -50,18 +52,14 @@ been runtime-validated.
    The earlier broad sweep included standalone inputs requiring harness or
    foreign imports; `select_eintr` and `fifo_eof` are POSIX-specific test
    sources, not by themselves product compiler failures.
-5. **Installer report:** the current release asset downloads correctly and
-   its `Invoke-Expression` path succeeded in an isolated reproduction. A user
-   reported a null-method error from `irm ... | iex`; obtain the full failing
-   error record/line and reproduce before attributing it to a particular
-   installer step. The installer is currently published as a release asset,
-   not tracked in the repository, because the repository gate does not allow
-   a root `install.ps1` file.
-6. **Upstream distribution:** inspect `../bend-lang.com` before attempting
+5. **Upstream distribution:** inspect `../bend-lang.com` before attempting
    official installer/update integration. It was absent in the prior
    environment. Do not invent Windows distribution URLs. The fork preview
    installer is the available distribution path; `bend update` is not an
    upstream Windows update integration.
+
+The installer is published as a release asset, not tracked in the repository,
+because the repository gate does not allow a root `install.ps1` file.
 
 ## Validation notes
 
