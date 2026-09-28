@@ -1,4 +1,4 @@
-# Bend on Windows (fork preview)
+# Bend on Windows
 
 This fork adds native Windows support to Bend 2.0.32. It is a preview, not an
 official Bend distribution. The installer and releases are published from
@@ -30,6 +30,24 @@ rights. Run the install command again to update. `bend` is a command shim;
 
 CUDA and Lean are optional. Without CUDA, GPU-marked programs run on the CPU.
 `--verdict` needs Lean 4.34.0. The installer does not install either dependency.
+
+## Uninstall
+
+In PowerShell, remove the Bend install and its user PATH entry:
+
+```powershell
+$bendHome = Join-Path $env:LOCALAPPDATA 'Programs\Bend'
+$binPath = Join-Path $bendHome 'bin'
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+$newPath = ($userPath -split ';' | Where-Object {
+  $_ -and $_.TrimEnd('\') -ine $binPath.TrimEnd('\')
+}) -join ';'
+[Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+Remove-Item -LiteralPath $bendHome -Recurse -Force
+```
+
+Open a new terminal afterward. This removes Bend's source snapshots, LLVM-MinGW
+copy, and command shim; it leaves Bun, Lean, and CUDA installed separately.
 
 ## Windows validation
 
