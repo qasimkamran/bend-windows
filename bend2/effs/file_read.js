@@ -4,6 +4,12 @@
 function file_read_with(file, max, offset, pack) {
   const len = Math.min(max, 2147483647);
   const b = new Uint8Array(Math.max(len, 1));
+  if (process.platform !== "win32") {
+    const sys = io_sys();
+    const n = Number(offset === null ? sys.read(file, sys.ptr(b), len)
+      : sys.pread(file, sys.ptr(b), len, BigInt(offset)));
+    return io_tup(file, n < 0 ? io_fail(sys.errno()) : io_done(pack(b, n)));
+  }
   try {
     const at = offset === null ? null : BigInt(offset);
     if (at !== null && at < 0n) {
