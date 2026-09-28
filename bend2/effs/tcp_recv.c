@@ -6,8 +6,8 @@
 // or a List of bytes (io_list).
 static Term tcp_recv_with(Env e, IoWork* w, IoPack more,
   Term (*read)(Env, const char*, u64)) {
-  int fd  = (int)w->hand;
-  w->size = io_sys_end(w, recv(fd, w->data, (size_t)w->made, 0));
+  IoSocket fd = (IoSocket)w->hand;
+  w->size = io_sys_end(w, io_net_recv(fd, w->data, (size_t)w->made, 0));
   if (w->code == EAGAIN) {
     return io_wait_on(w, fd, POLLIN, 0, more);
   }

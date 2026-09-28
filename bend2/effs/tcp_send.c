@@ -4,9 +4,10 @@
 // Sends what is left; a full socket (non-blocking, so EAGAIN) parks the
 // computation until the socket is writable, and the loop resumes here.
 static Term tcp_send_more(Env e, IoWork* w) {
-  int fd = (int)w->hand;
+  IoSocket fd = (IoSocket)w->hand;
   while (w->code == 0 && (u64)w->made < w->size) {
-    ssize_t n = send(fd, w->data + w->made, w->size - (u64)w->made, 0);
+    ssize_t n = io_net_send(fd, w->data + w->made,
+      w->size - (u64)w->made, 0);
     if (n < 0 && errno == EAGAIN) {
       return io_wait_on(w, fd, POLLOUT, 0, tcp_send_more);
     }

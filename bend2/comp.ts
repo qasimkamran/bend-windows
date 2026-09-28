@@ -5477,6 +5477,7 @@ typedef Term (*IoPack)(Env e, struct IoWork* w);
 typedef struct IoWork {
   intptr_t       hand;
   intptr_t       made;
+  intptr_t       pollfd;
   u32            word;
   u64            size;
   char*          data;
@@ -5500,6 +5501,138 @@ typedef struct {
 
 static IoEff io_eff_rows[1 << 16];
 static u32   io_live;
+
+#ifdef _WIN32
+typedef intptr_t IoSocket;
+
+static int io_wsa_errno(int code) {
+  switch (code) {
+    case 0: return 0;
+    case WSAEWOULDBLOCK: return EAGAIN;
+    case WSAEINPROGRESS: return EINPROGRESS;
+    case WSAEALREADY: return EALREADY;
+    case WSAEINVAL: return EINVAL;
+    case WSAEADDRINUSE: return EADDRINUSE;
+    case WSAECONNREFUSED: return ECONNREFUSED;
+    case WSAECONNRESET: return ECONNRESET;
+    case WSAEHOSTUNREACH: return EHOSTUNREACH;
+    case WSAENETUNREACH: return ENETUNREACH;
+    case WSAETIMEDOUT: return ETIMEDOUT;
+    case WSAEMSGSIZE: return EMSGSIZE;
+    case WSAENOTSOCK: return ENOTSOCK;
+    case WSAECONNABORTED: return ECONNABORTED;
+    default: return EIO;
+  }
+}
+
+static int io_net_errno(void) { return io_wsa_errno(WSAGetLastError()); }
+
+static IoSocket io_net_socket(int af, int type, int protocol) {
+  SOCKET fd = socket(af, type, protocol);
+  if (fd == INVALID_SOCKET) { errno = io_net_errno(); return -1; }
+  return (IoSocket)fd;
+}
+
+static int io_net_bind(IoSocket fd, const struct sockaddr* at, int len) {
+  int got = bind((SOCKET)fd, at, len);
+  if (got == SOCKET_ERROR) errno = io_net_errno();
+  return got;
+}
+
+static int io_net_connect(IoSocket fd, const struct sockaddr* at, int len) {
+  int got = connect((SOCKET)fd, at, len);
+  if (got == SOCKET_ERROR) {
+    int code = WSAGetLastError();
+    errno = code == WSAEWOULDBLOCK ? EINPROGRESS : io_wsa_errno(code);
+  }
+  return got;
+}
+
+static IoSocket io_net_accept(IoSocket fd, struct sockaddr* at,
+  socklen_t* len) {
+  SOCKET got = accept((SOCKET)fd, at, len);
+  if (got == INVALID_SOCKET) errno = io_net_errno();
+  return got == INVALID_SOCKET ? -1 : (IoSocket)got;
+}
+
+static int io_net_listen(IoSocket fd, int count) {
+  int got = listen((SOCKET)fd, count);
+  if (got == SOCKET_ERROR) errno = io_net_errno();
+  return got;
+}
+
+static int io_net_setsockopt(IoSocket fd, int level, int key,
+  const void* val, int len) {
+  int got = setsockopt((SOCKET)fd, level, key, (const char*)val, len);
+  if (got == SOCKET_ERROR) errno = io_net_errno();
+  return got;
+}
+
+static int io_net_getsockopt(IoSocket fd, int level, int key, void* val,
+  socklen_t* len) {
+  int got = getsockopt((SOCKET)fd, level, key, (char*)val, len);
+  if (got == SOCKET_ERROR) errno = io_net_errno();
+  else if (key == SO_ERROR) *(int*)val = io_wsa_errno(*(int*)val);
+  return got;
+}
+
+static ssize_t io_net_recv(IoSocket fd, void* data, size_t size, int flags) {
+  int got = recv((SOCKET)fd, data, size > INT_MAX ? INT_MAX : (int)size,
+    flags);
+  if (got == SOCKET_ERROR) { errno = io_net_errno(); return -1; }
+  return got;
+}
+
+static ssize_t io_net_send(IoSocket fd, const void* data, size_t size,
+  int flags) {
+  int got = send((SOCKET)fd, data, size > INT_MAX ? INT_MAX : (int)size,
+    flags);
+  if (got == SOCKET_ERROR) { errno = io_net_errno(); return -1; }
+  return got;
+}
+
+static ssize_t io_net_recvfrom(IoSocket fd, void* data, size_t size,
+  int flags, struct sockaddr* at, socklen_t* len) {
+  int got = recvfrom((SOCKET)fd, data,
+    size > INT_MAX ? INT_MAX : (int)size, flags,
+    at, len);
+  if (got == SOCKET_ERROR) { errno = io_net_errno(); return -1; }
+  return got;
+}
+
+static ssize_t io_net_sendto(IoSocket fd, const void* data, size_t size,
+  int flags, const struct sockaddr* at, int len) {
+  int got = sendto((SOCKET)fd, data, size > INT_MAX ? INT_MAX : (int)size, flags,
+    at, len);
+  if (got == SOCKET_ERROR) { errno = io_net_errno(); return -1; }
+  return got;
+}
+
+static int io_socket_nonblock(IoSocket fd) {
+  u_long on = 1;
+  int got = ioctlsocket((SOCKET)fd, FIONBIO, &on);
+  if (got == SOCKET_ERROR) errno = io_net_errno();
+  return got;
+}
+
+static int io_socket_close(IoSocket fd) { return closesocket((SOCKET)fd); }
+#else
+typedef int IoSocket;
+#define io_net_socket socket
+#define io_net_bind bind
+#define io_net_connect connect
+#define io_net_accept accept
+#define io_net_listen listen
+#define io_net_setsockopt setsockopt
+#define io_net_getsockopt getsockopt
+#define io_net_recv recv
+#define io_net_send send
+#define io_net_recvfrom recvfrom
+#define io_net_sendto sendto
+#define io_socket_nonblock(fd) \
+  fcntl((fd), F_SETFL, fcntl((fd), F_GETFL) | O_NONBLOCK)
+#define io_socket_close close
+#endif
 
 static u64 io_tick(void) {
 #ifdef _WIN32
@@ -5592,8 +5725,9 @@ static void io_park_add(IoWork* w) {
   p->next = w;
 }
 
-static Term io_wait_on(IoWork* w, int fd, short evts, u64 time, IoPack more) {
-  w->word = (u32)fd;
+static Term io_wait_on(IoWork* w, intptr_t fd, short evts, u64 time,
+  IoPack more) {
+  w->pollfd = fd;
   w->pack = more;
   w->time = time;
   w->evts = evts;
@@ -5864,36 +5998,42 @@ static bool io_bit(u8* set, int fd, bool put) {
 
 static void io_wait(Env e) {
 #ifdef _WIN32
-  fd_set reads, writes;
-  FD_ZERO(&reads);
-  FD_ZERO(&writes);
-  FD_SET(io_wake_fd[0], &reads);
+  u32 count = 1;
   u64 soon = 0;
   for (IoWork* a = io_park; a != NULL;
     a = a->next != io_park ? a->next : NULL) {
     if (a->time != 0 && (soon == 0 || a->time < soon)) soon = a->time;
-    if (a->evts == POLLOUT) FD_SET((SOCKET)a->word, &writes);
-    else if (a->evts != 0) FD_SET((SOCKET)a->word, &reads);
+    count += a->evts != 0;
+  }
+  WSAPOLLFD* fds = io_mem(calloc(count, sizeof(WSAPOLLFD)));
+  IoWork** who = io_mem(calloc(count, sizeof(IoWork*)));
+  fds[0] = (WSAPOLLFD){ io_wake_fd[0], POLLRDNORM, 0 };
+  u32 at = 1;
+  for (IoWork* a = io_park; a != NULL;
+    a = a->next != io_park ? a->next : NULL) {
+    if (a->evts != 0) {
+      fds[at] = (WSAPOLLFD){ (SOCKET)a->pollfd,
+        a->evts == POLLOUT ? POLLWRNORM : POLLRDNORM, 0 };
+      who[at++] = a;
+    }
   }
   u64 tick = io_tick();
   u64 ms = soon > tick ? (soon - tick + 999999ull) / 1000000ull : 0;
-  struct timeval tv = { (long)(ms / 1000), (long)(ms % 1000 * 1000) };
+  int wait = soon == 0 ? -1 : ms > INT_MAX ? INT_MAX : (int)ms;
   io_sync();
-  if (select(0, &reads, &writes, NULL, soon == 0 ? NULL : &tv)
-    == SOCKET_ERROR) {
+  if (WSAPoll(fds, count, wait) == SOCKET_ERROR) {
     err_fail("the poller failed");
   }
-  if (FD_ISSET(io_wake_fd[0], &reads)) io_take(e);
+  if (fds[0].revents != 0) io_take(e);
   u64 now = io_tick();
   IoWork* todo = io_park;
   io_park = NULL;
   while (todo != NULL) {
     IoWork* a = io_pop(&todo);
-    bool due = (a->evts == POLLOUT
-        && FD_ISSET((SOCKET)a->word, &writes))
-      || (a->evts != 0 && a->evts != POLLOUT
-        && FD_ISSET((SOCKET)a->word, &reads))
-      || (a->time != 0 && a->time <= now);
+    bool due = a->time != 0 && a->time <= now;
+    for (u32 i = 1; !due && i < count; i += 1) {
+      due = who[i] == a && fds[i].revents != 0;
+    }
     if (!due) {
       io_park_add(a);
       continue;
@@ -5904,6 +6044,8 @@ static void io_wait(Env e) {
       io_push(&io_runs, a);
     }
   }
+  free(fds);
+  free(who);
 #else
   int top  = io_wake_fd[0];
   u64 soon = 0;
@@ -5912,8 +6054,8 @@ static void io_wait(Env e) {
     if (a->time != 0 && (soon == 0 || a->time < soon)) {
       soon = a->time;
     }
-    if (a->evts != 0 && (int)a->word > top) {
-      top = (int)a->word;
+    if (a->evts != 0 && (int)a->pollfd > top) {
+      top = (int)a->pollfd;
     }
   }
   u64 len = (u64)top / 64 * 8 + 8;
@@ -5923,7 +6065,7 @@ static void io_wait(Env e) {
   for (IoWork* a = io_park; a != NULL;
     a = a->next != io_park ? a->next : NULL) {
     if (a->evts != 0) {
-      io_bit(set[a->evts == POLLOUT], (int)a->word, true);
+      io_bit(set[a->evts == POLLOUT], (int)a->pollfd, true);
     }
   }
   u64 tick = io_tick();
@@ -5946,7 +6088,7 @@ static void io_wait(Env e) {
   while (todo != NULL) {
     IoWork* a   = io_pop(&todo);
     bool    due = (a->evts != 0
-        && io_bit(set[a->evts == POLLOUT], (int)a->word, false))
+        && io_bit(set[a->evts == POLLOUT], (int)a->pollfd, false))
       || (a->time != 0 && a->time <= now);
     if (!due) {
       io_park_add(a);
@@ -6118,10 +6260,10 @@ static void io_step(Env e, IoWork* a) {
       err_fail("an alien request");
     }
     u32 need = io_eff_rows[c].ask;
-    u32 word = (u32)(need & IO_READ ? io_hand_v(e.mem[at]) : e.mem[at]);
+    u64 word = need & IO_READ ? io_hand_v(e.mem[at]) : e.mem[at];
     a->cont  = req;
     if (need != 0) {
-      io_wait_on(a, (int)word, need & IO_READ ? POLLIN : 0,
+      io_wait_on(a, (intptr_t)word, need & IO_READ ? POLLIN : 0,
         need & IO_TIME ? io_tick() + (u64)word * 1000000ull : 0, io_exec);
       return;
     }

@@ -7,8 +7,8 @@ static Term udp_recv_from_more(Env e, IoWork* w) {
   struct sockaddr_in at = { 0 };
   socklen_t alen = sizeof(at);
   char      host[16];
-  int       fd = (int)w->hand;
-  w->size = io_sys_end(w, recvfrom(fd, w->data, (size_t)w->made, 0,
+  IoSocket  fd = (IoSocket)w->hand;
+  w->size = io_sys_end(w, io_net_recvfrom(fd, w->data, (size_t)w->made, 0,
     (struct sockaddr*)&at, &alen));
   if (w->code == EAGAIN) {
     return io_wait_on(w, fd, POLLIN, 0, udp_recv_from_more);
