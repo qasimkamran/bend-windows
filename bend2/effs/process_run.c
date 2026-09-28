@@ -492,7 +492,7 @@ static void process_call(IoWork* w) {
     pipes[0][1] = NULL;
   }
   if (WaitForSingleObject(pi.hProcess, p->timeout) == WAIT_TIMEOUT) {
-    p->code = ETIMEDOUT;
+    p->code = 110;
     TerminateProcess(pi.hProcess, 1);
     WaitForSingleObject(pi.hProcess, INFINITE);
   }

@@ -3503,10 +3503,16 @@ using namespace metal;
 #define BARD()  \
   { __threadfence(); __syncthreads(); }
 #else
-#if __has_attribute(preserve_none) && __has_attribute(preserve_most)
+#if __has_attribute(preserve_none) && __has_attribute(preserve_most) \
+  && !defined(_WIN32)
 #define PRESERVE(A) __attribute__((A))
 #else
 #define PRESERVE(A)
+#endif
+#ifdef _WIN32
+#define WL_ABI __attribute__((sysv_abi))
+#else
+#define WL_ABI
 #endif
 #define OUTLINE static __attribute__((noinline, cold)) PRESERVE(preserve_most)
 #define DEVICE  0
@@ -3529,7 +3535,8 @@ using namespace metal;
 #else
 #define LOCK(l)    while (__atomic_exchange_n(&(l), 1, __ATOMIC_ACQUIRE)) {}
 #define UNLOCK(l)  __atomic_store_n(&(l), 0, __ATOMIC_RELEASE)
-#define WL_FN      static PRESERVE(preserve_none) __attribute__((noinline)) Term
+#define WL_FN      static WL_ABI PRESERVE(preserve_none) \
+  __attribute__((noinline)) Term
 #define WL_CASE(F) WL_FN WL_##F(WL_SIG)
 #define WL_OPEN    { WL_BANK u32 rn;
 #define WL_JMP(F)  __attribute__((musttail)) return WL_##F(WL_ALL)
@@ -4493,7 +4500,7 @@ ${spins}
 #define WL_SPUN
 #define WL_AGAIN(F) __attribute__((musttail)) return WL_##F(WL_ALL)
 
-typedef Term (PRESERVE(preserve_none) *WlFn)(WL_SIG);
+typedef Term (PRESERVE(preserve_none) WL_ABI *WlFn)(WL_SIG);
 #define WL_X(F) WL_FN WL_##F(WL_SIG);
 WL_TABLE WL_X(FID_ENTER)
 #undef WL_X
@@ -4502,7 +4509,7 @@ static const WlFn wl_tab[] = { WL_TABLE };
 #undef WL_X
 #endif
 
-static Term work_loop(Env e, DEV Term* sp, Term t, u32 seq) {
+static WL_ABI Term work_loop(Env e, DEV Term* sp, Term t, u32 seq) {
   WL_BANK
   u32 rn = 0;
   r0 = t;
