@@ -432,7 +432,7 @@ function cli_build(bin: string, file: string): void {
   const libs  = [["X11", "X11"], ["alsa", "asound"]].flatMap(([h, l]) =>
     !mac && !win && c.includes("#include <" + h + "/") ? ["-l" + l] : []);
   const cpu = [...objc, "-std=c11", "-O3", file, "-lpthread", "-lm",
-    ...win ? ["-lws2_32"] : [], ...libs, "-o", path.resolve(bin)];
+    ...win ? ["-lws2_32", "-lbcrypt"] : [], ...libs, "-o", path.resolve(bin)];
   const gpu = mac ? ["-DBEND_METAL=1", ...cpu]
     : ["-DBEND_CUDA=1", "-I" + cuda + "/include", "-L" + cuda + "/lib64",
       "-L" + cuda + "/lib", ...cpu, "-lcuda", "-lnvrtc"];
