@@ -3,6 +3,7 @@ param(
   [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\Bend'),
   [string]$CompilerPath,
   [string]$ReleaseTag,
+  [switch]$Local,
   [switch]$NoPath
 )
 
@@ -74,25 +75,47 @@ try {
   }
   $CompilerPath = (Resolve-Path -LiteralPath $CompilerPath).Path
 
-  if ([string]::IsNullOrWhiteSpace($ReleaseTag)) {
-    $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=100" -Headers $headers
-    $latest = $releases | Where-Object { -not $_.draft } | Sort-Object published_at -Descending | Select-Object -First 1
-    if (-not $latest) { throw "No published Bend release exists at $repo." }
-    $ReleaseTag = $latest.tag_name
+  if ($Local) {
+    $branch = (& git -C $PSScriptRoot branch --show-current).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($branch)) {
+      throw 'The -Local option requires install.ps1 to run inside a Git branch checkout.'
+    }
+    $sha = (& git -C $PSScriptRoot rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or $sha -notmatch '^[0-9a-f]{40}$') {
+      throw 'Could not resolve the current branch commit for a local install.'
+    }
+  } else {
+    if ([string]::IsNullOrWhiteSpace($ReleaseTag)) {
+      $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=100" -Headers $headers
+      $latest = $releases | Where-Object { -not $_.draft } | Sort-Object published_at -Descending | Select-Object -First 1
+      if (-not $latest) { throw "No published Bend release exists at $repo." }
+      $ReleaseTag = $latest.tag_name
+    }
+    $tag = [uri]::EscapeDataString($ReleaseTag)
+    $commit = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/commits/$tag" -Headers $headers
+    $sha = $commit.sha
   }
-  $tag = [uri]::EscapeDataString($ReleaseTag)
-  $commit = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/commits/$tag" -Headers $headers
-  $sha = $commit.sha
   $sourceRoot = Join-Path $InstallRoot "versions\$sha"
   if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot 'bend2\main.ts'))) {
     Write-Output "Installing Bend $($sha.Substring(0, 8))..."
-    install_zip "https://api.github.com/repos/$repo/zipball/$sha" (Join-Path $temp 'bend.zip') (Join-Path $temp 'source')
-    $source = Get-ChildItem -LiteralPath (Join-Path $temp 'source') -Directory | Select-Object -First 1
-    if (-not $source -or -not (Test-Path -LiteralPath (Join-Path $source.FullName 'bend2\main.ts'))) {
-      throw 'The downloaded Bend source archive has an unexpected layout.'
+    if ($Local) {
+      $archive = Join-Path $temp 'bend.zip'
+      & git -C $PSScriptRoot archive --format=zip --output=$archive $sha
+      if ($LASTEXITCODE -ne 0) { throw "Could not archive local Bend commit $sha." }
+      $sourceRootTemp = Join-Path $temp 'source'
+      New-Item -ItemType Directory -Path $sourceRootTemp | Out-Null
+      Expand-Archive -LiteralPath $archive -DestinationPath $sourceRootTemp -Force
+      $source = $sourceRootTemp
+    } else {
+      install_zip "https://api.github.com/repos/$repo/zipball/$sha" (Join-Path $temp 'bend.zip') (Join-Path $temp 'source')
+      $source = Get-ChildItem -LiteralPath (Join-Path $temp 'source') -Directory | Select-Object -First 1
+      if ($source) { $source = $source.FullName }
+    }
+    if (-not $source -or -not (Test-Path -LiteralPath (Join-Path $source 'bend2\main.ts'))) {
+      throw 'The Bend source archive has an unexpected layout.'
     }
     New-Item -ItemType Directory -Path (Split-Path -Parent $sourceRoot) -Force | Out-Null
-    Move-Item -LiteralPath $source.FullName -Destination $sourceRoot
+    Move-Item -LiteralPath $source -Destination $sourceRoot
   }
 
   $bin = Join-Path $InstallRoot 'bin'
@@ -127,6 +150,7 @@ try {
   }
 
   Write-Output "Bend is installed at $bin\bend.cmd"
+  if ($Local) { Write-Output "Installed local branch '$branch' at commit $sha." }
   if ($NoPath) {
     Write-Output "Run it with: `"$bin\bend.cmd`" <file.bend>"
   } else {

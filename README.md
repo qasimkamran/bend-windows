@@ -28,6 +28,11 @@ and adds `bend` to the user PATH. It does not require Git or administrator
 rights. Run the install command again to update. `bend` is a command shim;
 `-o .\main.exe` builds a native Windows program.
 
+To install the current commit from a local Bend checkout, run
+`./install.ps1 -Local` from that checkout. This archives the checked out
+branch's `HEAD` commit; uncommitted changes are not included. The installer
+still downloads the Windows toolchain if it is not already installed.
+
 CUDA and Lean are optional. Without CUDA, GPU-marked programs run on the CPU.
 `--verdict` needs Lean 4.34.0. The installer does not install either dependency.
 
