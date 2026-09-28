@@ -3459,6 +3459,9 @@ using namespace metal;
 #include <fcntl.h>
 #include <sys/stat.h>
 #endif
+#if defined(_WIN32) && BEND_CUDA
+int _fltused = 0x9875;
+#endif
 #endif
 
 // Dialect
