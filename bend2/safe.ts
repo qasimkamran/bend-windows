@@ -1351,12 +1351,14 @@ function kernel_bin(): string {
   const text = fs.readFileSync(src, "utf8");
   const hash = crypto.createHash("sha256").update(text).digest("hex").slice(0, 16);
   const dir = path.join(os.homedir(), ".bend", "bendtt", hash);
-  const bin = path.join(dir, "bendtt");
+  const exe = process.platform === "win32" ? ".exe" : "";
+  const bin = path.join(dir, "bendtt" + exe);
   if (fs.existsSync(bin)) {
     return bin;
   }
   const home = path.join(os.homedir(), ".elan", "toolchains", "leanprover--lean4---v4.34.0", "bin");
-  const tool = (t: string): string => fs.existsSync(path.join(home, t)) ? path.join(home, t) : t;
+  const tool = (t: string): string => fs.existsSync(path.join(home, t + exe))
+    ? path.join(home, t + exe) : t + exe;
   fs.mkdirSync(dir, { recursive: true });
   fs.copyFileSync(src, path.join(dir, "bendtt.lean"));
   const run = (bin: string, args: string[]): void => {
@@ -1367,7 +1369,7 @@ function kernel_bin(): string {
     }
   };
   run(tool("lean"), ["-c", "bendtt.c", "bendtt.lean"]);
-  run(tool("leanc"), ["-O3", "-DNDEBUG", "bendtt.c", "-o", "bendtt"]);
+  run(tool("leanc"), ["-O3", "-DNDEBUG", "bendtt.c", "-o", "bendtt" + exe]);
   return bin;
 }
 
