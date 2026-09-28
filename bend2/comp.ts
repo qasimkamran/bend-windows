@@ -4855,14 +4855,25 @@ static LONG CALLBACK pool_page_fault(EXCEPTION_POINTERS* e) {
     || x->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
   uintptr_t at = (uintptr_t)x->ExceptionInformation[1];
   MEMORY_BASIC_INFORMATION info;
-  if (VirtualQuery((void*)at, &info, sizeof info) == sizeof info
-    && info.State == MEM_RESERVE) {
+  SIZE_T queried = VirtualQuery((void*)at, &info, sizeof info);
+  if (queried != sizeof info) return EXCEPTION_CONTINUE_SEARCH;
+  if (info.State == MEM_COMMIT && info.Protect == PAGE_READWRITE) {
+    return EXCEPTION_CONTINUE_EXECUTION;
+  }
+  if (info.State == MEM_RESERVE) {
     SYSTEM_INFO sys;
     GetSystemInfo(&sys);
     uintptr_t page = at & ~((uintptr_t)sys.dwPageSize - 1);
-    return VirtualAlloc((void*)page, sys.dwPageSize, MEM_COMMIT,
-      PAGE_READWRITE) == NULL ? EXCEPTION_CONTINUE_SEARCH
-      : EXCEPTION_CONTINUE_EXECUTION;
+    void* committed = VirtualAlloc((void*)page, sys.dwPageSize, MEM_COMMIT,
+      PAGE_READWRITE);
+    if (committed != NULL) {
+      return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    queried = VirtualQuery((void*)page, &info, sizeof info);
+    if (queried == sizeof info && info.State == MEM_COMMIT
+      && info.Protect == PAGE_READWRITE) {
+      return EXCEPTION_CONTINUE_EXECUTION;
+    }
   }
   return EXCEPTION_CONTINUE_SEARCH;
 }
