@@ -19,7 +19,7 @@ function tcp_poll(socket, max, ms, k) {
       return io_tup(socket, io_done({ $: CID(Some), value: io_text(b, n) }));
     }
     const code = sys.errno();
-    if (code !== (sys.mac ? 35 : 11)) {
+    if (code !== sys.again) {
       return io_tup(socket, io_fail(code));
     }
     if (performance.now() >= at) {

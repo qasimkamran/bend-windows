@@ -12,7 +12,7 @@ function tcp_listen(host, port) {
     return io_fail(sys.errno());
   }
   const one = new Int32Array([1]);
-  const level = sys.mac ? 0xffff : 1;
+  const level = sys.mac || sys.win ? 0xffff : 1;
   sys.setsockopt(fd, level, sys.mac ? 4 : 2, sys.ptr(one), 4);
   if (sys.bind(fd, sys.ptr(at), 16) < 0 || sys.listen(fd, 512) < 0
     || sys.fcntl(fd, 4, sys.fcntl(fd, 3, 0) | (sys.mac ? 4 : 0x800)) < 0) {

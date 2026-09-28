@@ -6,7 +6,7 @@
 function tcp_send_with(socket, b, k) {
   const sys = io_sys();
   const fd = socket;
-  const again = sys.mac ? 35 : 11;
+  const again = sys.again;
   const go = (at) => {
     while (at < b.length) {
       const part = b.subarray(at);

@@ -15,7 +15,7 @@ function udp_recv_from(socket, max, k) {
     const n = Number(got);
     if (n < 0) {
       const code = sys.errno();
-      if (code === (sys.mac ? 35 : 11)) {
+      if (code === sys.again) {
         io_park_on(fd, false, k, go);
         return undefined;
       }

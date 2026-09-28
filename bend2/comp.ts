@@ -6651,7 +6651,81 @@ function io_errs(message) {
 function io_sys() {
   if (globalThis.BEND_SYS === undefined) {
     const ffi = require("bun:ffi");
+    const win = process.platform === "win32";
     const mac = process.platform === "darwin";
+    if (win) {
+      const T = { i: "i32", u: "u32", U: "u64", p: "ptr", c: "cstring" };
+      const lib = ffi.dlopen("ws2_32.dll", Object.fromEntries((
+        "WSAStartup:up>i WSAGetLastError:>i socket:iii>U bind:Upi>i"
+        + " listen:Ui>i connect:Upi>i accept:Upp>U send:UpUi>i recv:UpUi>i"
+        + " sendto:UpUipi>i recvfrom:UpUippp>i closesocket:U>i"
+        + " setsockopt:Uiipi>i getsockopt:Uiipp>i ioctlsocket:Uip>i"
+        + " select:ipppp>i"
+      ).split(" ").map((s) => {
+        const [name, args, ret] = s.split(/[:>]/);
+        return [name, { args: [...args].map((a) => T[a]), returns: T[ret] }];
+      }))).symbols;
+      const data = new Uint8Array(512);
+      if (lib.WSAStartup(0x0202, ffi.ptr(data)) !== 0) {
+        throw new Error("cannot initialize Windows sockets");
+      }
+      const sock = (name, result = "int") => (...xs) => {
+        const got = lib[name](BigInt(xs[0]), ...xs.slice(1));
+        return result === "socket"
+          ? got === 0xffffffffffffffffn ? -1 : Number(got) : got;
+      };
+      const codes = { 10035: 11, 10036: 115, 10037: 114, 10048: 98,
+        10049: 99, 10054: 104, 10060: 110, 10061: 111, 10064: 113,
+        10065: 101, 10040: 90, 10038: 88, 10009: 9 };
+      const fcntl = (fd, cmd) => cmd === 4
+        ? lib.ioctlsocket(BigInt(fd), 0x8004667e, ffi.ptr(new Uint32Array([1]))) : 0;
+      globalThis.BEND_SYS = { ...lib, win, mac: false, ptr: ffi.ptr,
+        socket: (...xs) => {
+          const got = lib.socket(...xs);
+          return got === 0xffffffffffffffffn ? -1 : Number(got);
+        },
+        bind: sock("bind"), listen: sock("listen"), connect: sock("connect"),
+        accept: sock("accept", "socket"), send: sock("send"),
+        recv: sock("recv"), sendto: sock("sendto"), recvfrom: sock("recvfrom"),
+        setsockopt: sock("setsockopt"), getsockopt: sock("getsockopt"),
+        fcntl, select: lib.select,
+        close: sock("closesocket"),
+        errno: () => codes[lib.WSAGetLastError()] ?? 5,
+        strerror: (code) => ({ 2: "No such file or directory",
+          5: "Input/output error", 9: "Bad file descriptor",
+          11: "Resource temporarily unavailable", 13: "Permission denied",
+          17: "File exists", 20: "Not a directory", 21: "Is a directory",
+          22: "Invalid argument", 24: "Too many open files",
+          28: "No space left on device", 32: "Broken pipe",
+          75: "Value too large for defined data type",
+          98: "Address already in use", 99: "Cannot assign requested address",
+          101: "Network is unreachable", 104: "Connection reset by peer",
+          110: "Connection timed out", 111: "Connection refused",
+          113: "No route to host" })[code] ?? "Unknown error" };
+      globalThis.BEND_SYS.again = 11;
+      globalThis.BEND_SYS.inprogress = 11;
+      globalThis.BEND_SYS.select_ready = (read, write, ms) => {
+        if (read.length === 0 && write.length === 0) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0,
+            ms < 0 ? undefined : ms);
+          return [[], []];
+        }
+        const pack = (xs) => {
+          const b = new BigUint64Array(1 + xs.length);
+          b[0] = BigInt(xs.length);
+          xs.forEach((x, i) => { b[i + 1] = BigInt(x); });
+          return b;
+        };
+        const r = pack(read), w = pack(write), t = new Int32Array(2);
+        if (ms >= 0) { t[0] = Math.floor(ms / 1000); t[1] = (ms % 1000) * 1000; }
+        const n = lib.select(0, ffi.ptr(r), ffi.ptr(w), null,
+          ms < 0 ? null : ffi.ptr(t));
+        if (n < 0) return null;
+        return [Array.from(r.slice(1, Number(r[0]) + 1), Number),
+          Array.from(w.slice(1, Number(w[0]) + 1), Number)];
+      };
+      return globalThis.BEND_SYS;
+    }
     const err = mac ? "__error" : "__errno_location";
     const sel = mac ? "select$DARWIN_EXTSN" : "select";
     const T = { i: "i32", u: "u32", U: "u64", I: "i64", p: "ptr",
@@ -6670,9 +6744,10 @@ function io_sys() {
     const fcntl = (fd, cmd, arg) => vari
       ? lib.fcntl(fd, cmd, 0, 0, 0, 0, 0, 0, arg)
       : lib.fcntl(fd, cmd, arg);
-    globalThis.BEND_SYS = { ...lib, fcntl, select: lib[sel],
-      ptr: ffi.ptr, mac,
-      errno: () => ffi.read.i32(lib[err](), 0) };
+      globalThis.BEND_SYS = { ...lib, fcntl, select: lib[sel],
+        ptr: ffi.ptr, mac, win: false, again: mac ? 35 : 11,
+        inprogress: mac ? 36 : 115,
+        errno: () => ffi.read.i32(lib[err](), 0) };
   }
   return globalThis.BEND_SYS;
 }
@@ -6739,6 +6814,21 @@ function io_wait(io) {
   const ms = soon === Infinity ? -1
     : Math.max(0, Math.ceil(soon - performance.now()));
   const fds = io.waits.filter((w) => w.fd !== undefined);
+  const sys = io_sys();
+  if (sys.win) {
+    const ready = sys.select_ready(fds.filter((w) => !w.out).map((w) => w.fd),
+      fds.filter((w) => w.out).map((w) => w.fd), ms);
+    if (ready === null) throw "bend: the poller failed";
+    const now = performance.now();
+    const reads = new Set(ready[0]), writes = new Set(ready[1]);
+    io.waits = io.waits.filter((w) => {
+      const readyNow = w.at <= now || w.fd !== undefined
+        && (w.out ? writes : reads).has(w.fd);
+      if (readyNow) io_push(io_wake, w, false);
+      return !readyNow;
+    });
+    return;
+  }
   const top = fds.reduce((m, w) => Math.max(m, w.fd), 0);
   const len = (top >> 6 << 3) + 8;
   const set = new Uint8Array(2 * len);
@@ -6748,7 +6838,6 @@ function io_wait(io) {
   }
   const tv = new BigInt64Array([BigInt(ms / 1000 | 0),
     BigInt(ms % 1000 * 1000)]);
-  const sys = io_sys();
   if (sys.select(top + 1, sys.ptr(set), sys.ptr(set, len), null,
     ms < 0 ? null : sys.ptr(tv)) < 0) {
     if (sys.errno() !== 4) {

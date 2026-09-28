@@ -11,7 +11,9 @@ function file_write_buffer(file, b) {
     }
     return io_tup(file, io_done({ $: CID(Unit) }));
   } catch (e) {
-    return io_tup(file, io_fail(Math.abs(e.errno ?? 5)));
+    const code = ({ EBADF: 9, EINVAL: 22, ENOSPC: 28, EPIPE: 32 }[e.code]
+      ?? Math.abs(e.errno ?? 5));
+    return io_tup(file, io_fail(code));
   }
 }
 

@@ -15,7 +15,7 @@ function udp_send_to(socket, host, port, data, k) {
     const sent = sys.sendto(fd, b.length ? sys.ptr(b) : null, b.length, 0, sys.ptr(at), 16);
     if (Number(sent) < 0) {
       const code = sys.errno();
-      if (code === (sys.mac ? 35 : 11)) {
+      if (code === sys.again) {
         io_park_on(fd, true, k, go);
         return undefined;
       }
