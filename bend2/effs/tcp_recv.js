@@ -11,7 +11,7 @@ function tcp_recv_with(socket, max, k, read) {
   const sys = io_sys();
   const fd = socket;
   const b = new Uint8Array(Number(max));
-  const again = sys.mac ? 35 : 11;
+  const again = sys.again;
   const go = () => {
     const n = Number(sys.recv(fd, sys.ptr(b), Number(max), 0));
     if (n < 0) {

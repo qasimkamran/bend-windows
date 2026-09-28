@@ -23,13 +23,14 @@ function tcp_connect(host, port, k) {
   const error = () => {
     const v = new Int32Array([0]);
     const l = new Uint32Array([4]);
-    return sys.getsockopt(fd, sys.mac ? 0xffff : 1, sys.mac ? 0x1007 : 4,
+    return sys.getsockopt(fd, sys.mac || sys.win ? 0xffff : 1,
+      sys.mac || sys.win ? 0x1007 : 4,
       sys.ptr(v), sys.ptr(l)) < 0 ? sys.errno() : v[0];
   };
   const set = sys.fcntl(fd, 4, sys.fcntl(fd, 3, 0) | (sys.mac ? 4 : 0x800));
   const ok = set >= 0 && sys.connect(fd, sys.ptr(at), 16) >= 0;
   const code = ok ? 0 : sys.errno();
-  if (code !== (sys.mac ? 36 : 115)) {
+  if (code !== sys.inprogress && code !== sys.again) {
     return end(code);
   }
   io_park_on(fd, true, k, () => end(error()));

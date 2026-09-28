@@ -2,15 +2,27 @@
 // ====
 
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <io.h>
+#endif
 
 // The size in bytes, as the host reports it; a file past 4 GiB fails
 // with EOVERFLOW.
 static void file_size_call(IoWork* w) {
+#ifdef _WIN32
+  struct _stat64 st;
+  int n = _fstat64((int)w->hand, &st);
+#else
   struct stat st;
   int n = fstat((int)w->hand, &st);
+#endif
   io_sys_end(w, n);
   if (n == 0) {
+#ifdef _WIN32
+    w->code = st.st_size > (long long)UINT32_MAX ? EOVERFLOW : 0;
+#else
     w->code = st.st_size > (off_t)UINT32_MAX ? EOVERFLOW : 0;
+#endif
     w->word = (u32)st.st_size;
   }
 }

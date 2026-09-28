@@ -11,7 +11,7 @@ function tcp_accept(listener, k) {
     const fd = sys.accept(lfd, null, null);
     if (fd < 0) {
       const code = sys.errno();
-      if (code === (sys.mac ? 35 : 11)) {
+      if (code === sys.again) {
         io_park_on(lfd, false, k, go);
         return undefined;
       }

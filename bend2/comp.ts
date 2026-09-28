@@ -3414,8 +3414,19 @@ using namespace metal;
 #elif !defined(BEND_RTC)
 #ifdef __APPLE__
 #define _DARWIN_UNLIMITED_SELECT
-#else
+#elif !defined(_WIN32)
 #define _GNU_SOURCE
+#endif
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <winsock2.h>
+#include <windows.h>
+#include <io.h>
+#include <unistd.h>
+#define MAP_FAILED ((void*)(intptr_t)-1)
+#define SIGPIPE 13
+#define munmap(p, n) (VirtualFree((p), 0, MEM_RELEASE) ? 0 : -1)
 #endif
 #include <stdint.h>
 #include <stdbool.h>
@@ -3426,12 +3437,16 @@ using namespace metal;
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
+#ifndef _WIN32
 #include <unistd.h>
 #include <signal.h>
 #include <sys/mman.h>
+#endif
 #include <time.h>
+#ifndef _WIN32
 #include <poll.h>
 #include <sys/select.h>
+#endif
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
@@ -3443,6 +3458,9 @@ using namespace metal;
 #include <nvrtc.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#endif
+#if defined(_WIN32) && BEND_CUDA
+int _fltused = 0x9875;
 #endif
 #endif
 
@@ -3488,16 +3506,25 @@ using namespace metal;
 #define BARD()  \
   { __threadfence(); __syncthreads(); }
 #else
-#if __has_attribute(preserve_none) && __has_attribute(preserve_most)
+#if __has_attribute(preserve_none) && __has_attribute(preserve_most) \
+  && !defined(_WIN32)
 #define PRESERVE(A) __attribute__((A))
 #else
 #define PRESERVE(A)
+#endif
+#ifdef _WIN32
+#define WL_ABI __attribute__((sysv_abi))
+#else
+#define WL_ABI
 #endif
 #define OUTLINE static __attribute__((noinline, cold)) PRESERVE(preserve_most)
 #define DEVICE  0
 #define CLZ(x)  (u32)__builtin_clz(x)
 #define FENCE() ((void)0)
 #endif
+#endif
+#ifdef _WIN32
+#undef FAR
 #endif
 #define FAR static __attribute__((noinline))
 
@@ -3511,7 +3538,8 @@ using namespace metal;
 #else
 #define LOCK(l)    while (__atomic_exchange_n(&(l), 1, __ATOMIC_ACQUIRE)) {}
 #define UNLOCK(l)  __atomic_store_n(&(l), 0, __ATOMIC_RELEASE)
-#define WL_FN      static PRESERVE(preserve_none) __attribute__((noinline)) Term
+#define WL_FN      static WL_ABI PRESERVE(preserve_none) \
+  __attribute__((noinline)) Term
 #define WL_CASE(F) WL_FN WL_##F(WL_SIG)
 #define WL_OPEN    { WL_BANK u32 rn;
 #define WL_JMP(F)  __attribute__((musttail)) return WL_##F(WL_ALL)
@@ -3670,6 +3698,9 @@ static u32             pool_tick;
 static u32             pool_done;
 static pthread_mutex_t pool_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  pool_wake = PTHREAD_COND_INITIALIZER;
+#ifdef _WIN32
+static pthread_mutex_t io_file_pos_lock = PTHREAD_MUTEX_INITIALIZER;
+#endif
 
 #if BEND_METAL || BEND_CUDA
 #pragma clang diagnostic ignored "-Wc23-extensions"
@@ -3843,6 +3874,13 @@ static void err_post(u64* H, u32 code) {
 static void err_trap(int sig) {
   err_post(NULL, ERR_DEEP);
 }
+
+#ifdef _WIN32
+static LONG WINAPI err_exception(EXCEPTION_POINTERS* e) {
+  err_trap((int)e->ExceptionRecord->ExceptionCode);
+  return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
 
 #endif
 
@@ -4465,7 +4503,7 @@ ${spins}
 #define WL_SPUN
 #define WL_AGAIN(F) __attribute__((musttail)) return WL_##F(WL_ALL)
 
-typedef Term (PRESERVE(preserve_none) *WlFn)(WL_SIG);
+typedef Term (PRESERVE(preserve_none) WL_ABI *WlFn)(WL_SIG);
 #define WL_X(F) WL_FN WL_##F(WL_SIG);
 WL_TABLE WL_X(FID_ENTER)
 #undef WL_X
@@ -4474,7 +4512,7 @@ static const WlFn wl_tab[] = { WL_TABLE };
 #undef WL_X
 #endif
 
-static Term work_loop(Env e, DEV Term* sp, Term t, u32 seq) {
+static WL_ABI Term work_loop(Env e, DEV Term* sp, Term t, u32 seq) {
   WL_BANK
   u32 rn = 0;
   r0 = t;
@@ -4749,7 +4787,7 @@ extern "C" __global__ void bend_dev(DEV u64* H, u32 pass) {
 
 // Linux's window fill (the Mac's is window_msl): an Image is a quadtree over
 // 2^k x 2^k (Qua splits tl, tr, bl, br; Pix is 0xRRGGBB).
-#if defined(__linux__) || defined(BEND_RTC)
+#if defined(__linux__) || defined(_WIN32) || defined(BEND_RTC)
 
 INLINE u32 window_pix(DEV u64* H, Term t, u32 k, u32 x, u32 y) {
   for (u32 i = k; term_tag(t) == TAG_CTR;) {
@@ -4810,9 +4848,39 @@ static void row_grow(Env e, DEV Term* stk, u32 base, u32 stride, u32 want) {
 // Pool
 // ====
 
+#ifdef _WIN32
+static LONG CALLBACK pool_page_fault(EXCEPTION_POINTERS* e) {
+  EXCEPTION_RECORD* x = e->ExceptionRecord;
+  if (x->ExceptionCode != EXCEPTION_ACCESS_VIOLATION
+    || x->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
+  uintptr_t at = (uintptr_t)x->ExceptionInformation[1];
+  MEMORY_BASIC_INFORMATION info;
+  if (VirtualQuery((void*)at, &info, sizeof info) == sizeof info
+    && info.State == MEM_RESERVE) {
+    SYSTEM_INFO sys;
+    GetSystemInfo(&sys);
+    uintptr_t page = at & ~((uintptr_t)sys.dwPageSize - 1);
+    return VirtualAlloc((void*)page, sys.dwPageSize, MEM_COMMIT,
+      PAGE_READWRITE) == NULL ? EXCEPTION_CONTINUE_SEARCH
+      : EXCEPTION_CONTINUE_EXECUTION;
+  }
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
 static void* pool_try(void* at, u64 bytes) {
+#ifdef _WIN32
+  static bool fault_hook;
+  if (!fault_hook) {
+    if (AddVectoredExceptionHandler(1, pool_page_fault) == NULL) return MAP_FAILED;
+    fault_hook = true;
+  }
+  void* p = VirtualAlloc(at, (SIZE_T)bytes, MEM_RESERVE, PAGE_READWRITE);
+  return p == NULL ? MAP_FAILED : p;
+#else
   return mmap(at, bytes, PROT_READ | PROT_WRITE,
     MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+#endif
 }
 
 static void* pool_mmap(u64 bytes) {
@@ -4825,6 +4893,12 @@ static void* pool_mmap(u64 bytes) {
 
 static Term* pool_stack(void) {
   u64   len = 1ull << 31;
+#ifdef _WIN32
+  char* p = pool_mmap(len + 16384);
+  if (VirtualAlloc(p + len, 16384, MEM_COMMIT, PAGE_NOACCESS) == NULL) {
+    err_fail("stack guard failed");
+  }
+#else
   char* p   = pool_mmap(len + 16384 + SIGSTKSZ);
   if (mprotect(p + len, 16384, PROT_NONE) != 0) {
     err_fail("stack guard failed");
@@ -4834,6 +4908,7 @@ static Term* pool_stack(void) {
   struct sigaction sa = { .sa_handler = err_trap, .sa_flags = SA_ONSTACK };
   sigaction(SIGSEGV, &sa, NULL);
   sigaction(SIGBUS, &sa, NULL);
+#endif
   return (Term*)p;
 }
 
@@ -4898,6 +4973,11 @@ static int cpu_read(const char* path, long* a, long* b) {
 }
 
 static long cpu_count(void) {
+#ifdef _WIN32
+  SYSTEM_INFO info;
+  GetSystemInfo(&info);
+  return (long)info.dwNumberOfProcessors;
+#else
   long n = sysconf(_SC_NPROCESSORS_ONLN);
 #ifdef __linux__
   cpu_set_t set;
@@ -4915,6 +4995,7 @@ static long cpu_count(void) {
   }
 #endif
   return n;
+#endif
 }
 
 OUTLINE void pool_turn(bool grow) {
@@ -4945,10 +5026,37 @@ static const char* gpu_path(void) {
   u32 n = sizeof path - 8;
 #ifdef __APPLE__
   _NSGetExecutablePath(path, &n);
+#elif defined(_WIN32)
+  WCHAR wide[4096];
+  n = GetModuleFileNameW(NULL, wide, sizeof wide / sizeof wide[0]);
+  if (n == 0 || n >= sizeof wide / sizeof wide[0]
+    || WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1,
+      path, sizeof path - 8, NULL, NULL) <= 0) {
+    return "bend.exe.gpu";
+  }
 #else
   path[readlink("/proc/self/exe", path, n)] = 0;
 #endif
   return strcat(path, ".gpu");
+}
+
+static FILE* gpu_open(const char* path, bool write) {
+#ifdef _WIN32
+  int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+    NULL, 0);
+  if (n <= 0) return NULL;
+  WCHAR* wide = malloc((size_t)n * sizeof(WCHAR));
+  if (wide == NULL || MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+    path, -1, wide, n) != n) {
+    free(wide);
+    return NULL;
+  }
+  FILE* file = _wfopen(wide, write ? L"wb" : L"rb");
+  free(wide);
+  return file;
+#else
+  return fopen(path, write ? "wb" : "rb");
+#endif
 }
 
 static void gpu_note(const char* path) {
@@ -5108,7 +5216,13 @@ static void gpu_shape(int units) {
 static bool gpu_probe(void) {
   int       managed = 0;
   CUcontext ctx;
+#ifdef _WIN32
+  if (getenv("CUDA_DEVICE_MAX_CONNECTIONS") == NULL) {
+    _putenv_s("CUDA_DEVICE_MAX_CONNECTIONS", "1");
+  }
+#else
   setenv("CUDA_DEVICE_MAX_CONNECTIONS", "1", 0);
+#endif
   if (cuInit(0) == CUDA_SUCCESS && cuDeviceGet(&gpu_dev, 0) == CUDA_SUCCESS) {
     cuDeviceGetAttribute(&managed,
       CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS, gpu_dev);
@@ -5168,7 +5282,7 @@ static bool gpu_make(const char* path) {
   }
   nvrtcDestroyProgram(&prog);
   u64   key = gpu_hash();
-  FILE* out = path == NULL ? NULL : fopen(path, "wb");
+  FILE* out = path == NULL ? NULL : gpu_open(path, true);
   bool  ok  = out != NULL && fwrite(&key, 8, 1, out) == 1
     && fwrite(bin, 1, len, out) == len && fclose(out) == 0;
   if (cuModuleLoadData(&gpu_lib, bin) != CUDA_SUCCESS) {
@@ -5186,6 +5300,28 @@ static u64 gpu_span(void) {
 
 static void gpu_load(u64 bytes) {
   const char* path = gpu_path();
+#ifdef _WIN32
+  FILE* in = gpu_open(path, false);
+  u64   key = 0;
+  long  len = -1;
+  char* bin = NULL;
+  if (in != NULL && fseek(in, 0, SEEK_END) == 0
+    && (len = ftell(in)) > 8 && fseek(in, 0, SEEK_SET) == 0) {
+    bin = malloc((size_t)len);
+    if (bin == NULL || fread(bin, 1, (size_t)len, in) != (size_t)len) {
+      free(bin);
+      bin = NULL;
+    }
+  }
+  if (in != NULL) fclose(in);
+  if (bin != NULL) memcpy(&key, bin, 8);
+  if (bin == NULL || key != gpu_hash()
+    || cuModuleLoadData(&gpu_lib, bin + 8) != CUDA_SUCCESS) {
+    gpu_note(path);
+    gpu_make(path);
+  }
+  free(bin);
+#else
   int         fd   = open(path, O_RDONLY);
   struct stat st   = { 0 };
   u64         key  = 0;
@@ -5199,6 +5335,7 @@ static void gpu_load(u64 bytes) {
     gpu_note(path);
     gpu_make(path);
   }
+#endif
   if (cuModuleGetFunction(&gpu_pso, gpu_lib, "bend_dev") != CUDA_SUCCESS) {
     err_fail("cannot load the GPU program");
   }
@@ -5402,11 +5539,16 @@ OUTLINE Term corpus_eval(u64* H, Term t) {
 // macOS poll misses FIFO EOF, so io_wait selects, its sets sized to the
 // highest fd (_DARWIN_UNLIMITED_SELECT allows fds past FD_SETSIZE).
 
+#ifdef _WIN32
+#include <ws2tcpip.h>
+typedef int socklen_t;
+#else
 #include <arpa/inet.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#endif
+#include <errno.h>
+#include <fcntl.h>
 
 #define IO_READ 1
 #define IO_TIME 2
@@ -5422,6 +5564,9 @@ typedef Term (*IoPack)(Env e, struct IoWork* w);
 typedef struct IoWork {
   intptr_t       hand;
   intptr_t       made;
+#ifdef _WIN32
+  intptr_t       pollfd;
+#endif
   u32            word;
   u64            size;
   char*          data;
@@ -5446,10 +5591,150 @@ typedef struct {
 static IoEff io_eff_rows[1 << 16];
 static u32   io_live;
 
+#ifdef _WIN32
+typedef intptr_t IoSocket;
+
+static int io_wsa_errno(int code) {
+  switch (code) {
+    case 0: return 0;
+    case WSAEWOULDBLOCK: return EAGAIN;
+    case WSAEINPROGRESS: return EINPROGRESS;
+    case WSAEALREADY: return EALREADY;
+    case WSAEINVAL: return EINVAL;
+    case WSAEADDRINUSE: return EADDRINUSE;
+    case WSAECONNREFUSED: return ECONNREFUSED;
+    case WSAECONNRESET: return ECONNRESET;
+    case WSAEHOSTUNREACH: return EHOSTUNREACH;
+    case WSAENETUNREACH: return ENETUNREACH;
+    case WSAETIMEDOUT: return ETIMEDOUT;
+    case WSAEMSGSIZE: return EMSGSIZE;
+    case WSAENOTSOCK: return ENOTSOCK;
+    case WSAECONNABORTED: return ECONNABORTED;
+    default: return EIO;
+  }
+}
+
+static int io_net_errno(void) { return io_wsa_errno(WSAGetLastError()); }
+
+static IoSocket io_net_socket(int af, int type, int protocol) {
+  SOCKET fd = socket(af, type, protocol);
+  if (fd == INVALID_SOCKET) { errno = io_net_errno(); return -1; }
+  return (IoSocket)fd;
+}
+
+static int io_net_bind(IoSocket fd, const struct sockaddr* at, int len) {
+  int got = bind((SOCKET)fd, at, len);
+  if (got == SOCKET_ERROR) errno = io_net_errno();
+  return got;
+}
+
+static int io_net_connect(IoSocket fd, const struct sockaddr* at, int len) {
+  int got = connect((SOCKET)fd, at, len);
+  if (got == SOCKET_ERROR) {
+    int code = WSAGetLastError();
+    errno = code == WSAEWOULDBLOCK ? EINPROGRESS : io_wsa_errno(code);
+  }
+  return got;
+}
+
+static IoSocket io_net_accept(IoSocket fd, struct sockaddr* at,
+  socklen_t* len) {
+  SOCKET got = accept((SOCKET)fd, at, len);
+  if (got == INVALID_SOCKET) errno = io_net_errno();
+  return got == INVALID_SOCKET ? -1 : (IoSocket)got;
+}
+
+static int io_net_listen(IoSocket fd, int count) {
+  int got = listen((SOCKET)fd, count);
+  if (got == SOCKET_ERROR) errno = io_net_errno();
+  return got;
+}
+
+static int io_net_setsockopt(IoSocket fd, int level, int key,
+  const void* val, int len) {
+  int got = setsockopt((SOCKET)fd, level, key, (const char*)val, len);
+  if (got == SOCKET_ERROR) errno = io_net_errno();
+  return got;
+}
+
+static int io_net_getsockopt(IoSocket fd, int level, int key, void* val,
+  socklen_t* len) {
+  int got = getsockopt((SOCKET)fd, level, key, (char*)val, len);
+  if (got == SOCKET_ERROR) errno = io_net_errno();
+  else if (key == SO_ERROR) *(int*)val = io_wsa_errno(*(int*)val);
+  return got;
+}
+
+static ssize_t io_net_recv(IoSocket fd, void* data, size_t size, int flags) {
+  int got = recv((SOCKET)fd, data, size > INT_MAX ? INT_MAX : (int)size,
+    flags);
+  if (got == SOCKET_ERROR) { errno = io_net_errno(); return -1; }
+  return got;
+}
+
+static ssize_t io_net_send(IoSocket fd, const void* data, size_t size,
+  int flags) {
+  int got = send((SOCKET)fd, data, size > INT_MAX ? INT_MAX : (int)size,
+    flags);
+  if (got == SOCKET_ERROR) { errno = io_net_errno(); return -1; }
+  return got;
+}
+
+static ssize_t io_net_recvfrom(IoSocket fd, void* data, size_t size,
+  int flags, struct sockaddr* at, socklen_t* len) {
+  int got = recvfrom((SOCKET)fd, data,
+    size > INT_MAX ? INT_MAX : (int)size, flags,
+    at, len);
+  if (got == SOCKET_ERROR) { errno = io_net_errno(); return -1; }
+  return got;
+}
+
+static ssize_t io_net_sendto(IoSocket fd, const void* data, size_t size,
+  int flags, const struct sockaddr* at, int len) {
+  int got = sendto((SOCKET)fd, data, size > INT_MAX ? INT_MAX : (int)size, flags,
+    at, len);
+  if (got == SOCKET_ERROR) { errno = io_net_errno(); return -1; }
+  return got;
+}
+
+static int io_socket_nonblock(IoSocket fd) {
+  u_long on = 1;
+  int got = ioctlsocket((SOCKET)fd, FIONBIO, &on);
+  if (got == SOCKET_ERROR) errno = io_net_errno();
+  return got;
+}
+
+static int io_socket_close(IoSocket fd) { return closesocket((SOCKET)fd); }
+#else
+typedef int IoSocket;
+#define io_net_socket socket
+#define io_net_bind bind
+#define io_net_connect connect
+#define io_net_accept accept
+#define io_net_listen listen
+#define io_net_setsockopt setsockopt
+#define io_net_getsockopt getsockopt
+#define io_net_recv recv
+#define io_net_send send
+#define io_net_recvfrom recvfrom
+#define io_net_sendto sendto
+#define io_socket_nonblock(fd) \
+  fcntl((fd), F_SETFL, fcntl((fd), F_GETFL) | O_NONBLOCK)
+#define io_socket_close close
+#endif
+
 static u64 io_tick(void) {
+#ifdef _WIN32
+  LARGE_INTEGER now, freq;
+  QueryPerformanceCounter(&now);
+  QueryPerformanceFrequency(&freq);
+  return (u64)(now.QuadPart / freq.QuadPart) * 1000000000ull
+    + (u64)(now.QuadPart % freq.QuadPart) * 1000000000ull / freq.QuadPart;
+#else
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (u64)ts.tv_sec * 1000000000ull + (u64)ts.tv_nsec;
+#endif
 }
 
 OUTLINE void* io_mem(void* mem) {
@@ -5529,8 +5814,13 @@ static void io_park_add(IoWork* w) {
   p->next = w;
 }
 
-static Term io_wait_on(IoWork* w, int fd, short evts, u64 time, IoPack more) {
+static Term io_wait_on(IoWork* w, intptr_t fd, short evts, u64 time,
+  IoPack more) {
+#ifdef _WIN32
+  w->pollfd = fd;
+#else
   w->word = (u32)fd;
+#endif
   w->pack = more;
   w->time = time;
   w->evts = evts;
@@ -5691,12 +5981,53 @@ static pthread_mutex_t io_gate = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  io_bell = PTHREAD_COND_INITIALIZER;
 static u32             io_busy;
 static u32             io_size;
+#ifdef _WIN32
+static SOCKET          io_wake_fd[2] = { INVALID_SOCKET, INVALID_SOCKET };
+
+static int io_wake_open(void) {
+  WSADATA data;
+  if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return -1;
+  SOCKET a = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  SOCKET b = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  struct sockaddr_in aa = { .sin_family = AF_INET,
+    .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+  struct sockaddr_in bb = aa;
+  int n = sizeof aa;
+  if (a == INVALID_SOCKET || b == INVALID_SOCKET || bind(a,
+    (struct sockaddr*)&aa, sizeof aa) == SOCKET_ERROR || getsockname(a,
+    (struct sockaddr*)&aa, &n) == SOCKET_ERROR || bind(b,
+    (struct sockaddr*)&bb, sizeof bb) == SOCKET_ERROR || getsockname(b,
+    (struct sockaddr*)&bb, &n) == SOCKET_ERROR || connect(a,
+    (struct sockaddr*)&bb, sizeof bb) == SOCKET_ERROR || connect(b,
+    (struct sockaddr*)&aa, sizeof aa) == SOCKET_ERROR) {
+    if (a != INVALID_SOCKET) closesocket(a);
+    if (b != INVALID_SOCKET) closesocket(b);
+    return -1;
+  }
+  u_long nonblock = 1;
+  if (ioctlsocket(a, FIONBIO, &nonblock) == SOCKET_ERROR
+    || ioctlsocket(b, FIONBIO, &nonblock) == SOCKET_ERROR) {
+    closesocket(a);
+    closesocket(b);
+    return -1;
+  }
+  io_wake_fd[0] = a;
+  io_wake_fd[1] = b;
+  return 0;
+}
+#else
 static int             io_wake_fd[2];
+#endif
 
 static void io_take(Env e) {
   IoWork* acts[64];
+#ifdef _WIN32
+  int n;
+  while ((n = recv(io_wake_fd[0], (char*)acts, sizeof acts, 0)) > 0) {
+#else
   ssize_t n;
   while ((n = read(io_wake_fd[0], acts, sizeof acts)) > 0) {
+#endif
     for (u32 i = 0; i < (u32)n / sizeof(IoWork*); i += 1) {
       IoWork* a = acts[i];
       a->item   = a->pack(e, a);
@@ -5715,7 +6046,11 @@ static void* io_help(void* arg) {
     IoWork* a = io_pop(&io_jobs);
     pthread_mutex_unlock(&io_gate);
     a->call(a);
+#ifdef _WIN32
+    while (send(io_wake_fd[1], (const char*)&a, sizeof a, 0) == SOCKET_ERROR) {
+#else
     while (write(io_wake_fd[1], &a, sizeof a) != sizeof a) {
+#endif
     }
   }
 }
@@ -5755,6 +6090,56 @@ static bool io_bit(u8* set, int fd, bool put) {
 }
 
 static void io_wait(Env e) {
+#ifdef _WIN32
+  u32 count = 1;
+  u64 soon = 0;
+  for (IoWork* a = io_park; a != NULL;
+    a = a->next != io_park ? a->next : NULL) {
+    if (a->time != 0 && (soon == 0 || a->time < soon)) soon = a->time;
+    count += a->evts != 0;
+  }
+  WSAPOLLFD* fds = io_mem(calloc(count, sizeof(WSAPOLLFD)));
+  IoWork** who = io_mem(calloc(count, sizeof(IoWork*)));
+  fds[0] = (WSAPOLLFD){ io_wake_fd[0], POLLRDNORM, 0 };
+  u32 at = 1;
+  for (IoWork* a = io_park; a != NULL;
+    a = a->next != io_park ? a->next : NULL) {
+    if (a->evts != 0) {
+      fds[at] = (WSAPOLLFD){ (SOCKET)a->pollfd,
+        a->evts == POLLOUT ? POLLWRNORM : POLLRDNORM, 0 };
+      who[at++] = a;
+    }
+  }
+  u64 tick = io_tick();
+  u64 ms = soon > tick ? (soon - tick + 999999ull) / 1000000ull : 0;
+  int wait = soon == 0 ? -1 : ms > INT_MAX ? INT_MAX : (int)ms;
+  io_sync();
+  if (WSAPoll(fds, count, wait) == SOCKET_ERROR) {
+    err_fail("the poller failed");
+  }
+  if (fds[0].revents != 0) io_take(e);
+  u64 now = io_tick();
+  IoWork* todo = io_park;
+  io_park = NULL;
+  while (todo != NULL) {
+    IoWork* a = io_pop(&todo);
+    bool due = a->time != 0 && a->time <= now;
+    for (u32 i = 1; !due && i < count; i += 1) {
+      due = who[i] == a && fds[i].revents != 0;
+    }
+    if (!due) {
+      io_park_add(a);
+      continue;
+    }
+    Term x = a->pack(e, a);
+    if (x != IO_PARK) {
+      a->item = x;
+      io_push(&io_runs, a);
+    }
+  }
+  free(fds);
+  free(who);
+#else
   int top  = io_wake_fd[0];
   u64 soon = 0;
   for (IoWork* a = io_park; a != NULL;
@@ -5809,6 +6194,7 @@ static void io_wait(Env e) {
     }
   }
   free(set[0]);
+#endif
 }
 
 ${NATIVE.IO}
@@ -5967,10 +6353,14 @@ static void io_step(Env e, IoWork* a) {
       err_fail("an alien request");
     }
     u32 need = io_eff_rows[c].ask;
+#ifdef _WIN32
+    u64 word = need & IO_READ ? io_hand_v(e.mem[at]) : e.mem[at];
+#else
     u32 word = (u32)(need & IO_READ ? io_hand_v(e.mem[at]) : e.mem[at]);
+#endif
     a->cont  = req;
     if (need != 0) {
-      io_wait_on(a, (int)word, need & IO_READ ? POLLIN : 0,
+      io_wait_on(a, (intptr_t)word, need & IO_READ ? POLLIN : 0,
         need & IO_TIME ? io_tick() + (u64)word * 1000000ull : 0, io_exec);
       return;
     }
@@ -5985,10 +6375,17 @@ static void io_step(Env e, IoWork* a) {
 OUTLINE void io_loop(u64* H) {
   Env e = { H, ALC[0] };
   io_stk = pool_stack();
+#ifdef _WIN32
+  SetUnhandledExceptionFilter(err_exception);
+  if (io_wake_open() != 0) {
+    err_fail("the event loop failed to open");
+  }
+#else
   signal(SIGPIPE, SIG_IGN);
   if (pipe(io_wake_fd) | fcntl(io_wake_fd[0], F_SETFL, O_NONBLOCK)) {
     err_fail("the event loop failed to open");
   }
+#endif
   Term m = corpus_eval(H, term_tsk(MAIN_FID, task_node(e, MAIN_FID,
     TERM_HOLE, 0, 0)));
 #if MAIN_PURE
@@ -6264,7 +6661,81 @@ function io_errs(message) {
 function io_sys() {
   if (globalThis.BEND_SYS === undefined) {
     const ffi = require("bun:ffi");
+    const win = process.platform === "win32";
     const mac = process.platform === "darwin";
+    if (win) {
+      const T = { i: "i32", u: "u32", U: "u64", p: "ptr", c: "cstring" };
+      const lib = ffi.dlopen("ws2_32.dll", Object.fromEntries((
+        "WSAStartup:up>i WSAGetLastError:>i socket:iii>U bind:Upi>i"
+        + " listen:Ui>i connect:Upi>i accept:Upp>U send:UpUi>i recv:UpUi>i"
+        + " sendto:UpUipi>i recvfrom:UpUippp>i closesocket:U>i"
+        + " setsockopt:Uiipi>i getsockopt:Uiipp>i ioctlsocket:Uip>i"
+        + " select:ipppp>i"
+      ).split(" ").map((s) => {
+        const [name, args, ret] = s.split(/[:>]/);
+        return [name, { args: [...args].map((a) => T[a]), returns: T[ret] }];
+      }))).symbols;
+      const data = new Uint8Array(512);
+      if (lib.WSAStartup(0x0202, ffi.ptr(data)) !== 0) {
+        throw new Error("cannot initialize Windows sockets");
+      }
+      const sock = (name, result = "int") => (...xs) => {
+        const got = lib[name](BigInt(xs[0]), ...xs.slice(1));
+        return result === "socket"
+          ? got === 0xffffffffffffffffn ? -1 : Number(got) : got;
+      };
+      const codes = { 10035: 11, 10036: 115, 10037: 114, 10048: 98,
+        10049: 99, 10054: 104, 10060: 110, 10061: 111, 10064: 113,
+        10065: 101, 10040: 90, 10038: 88, 10009: 9 };
+      const fcntl = (fd, cmd) => cmd === 4
+        ? lib.ioctlsocket(BigInt(fd), 0x8004667e, ffi.ptr(new Uint32Array([1]))) : 0;
+      globalThis.BEND_SYS = { ...lib, win, mac: false, ptr: ffi.ptr,
+        socket: (...xs) => {
+          const got = lib.socket(...xs);
+          return got === 0xffffffffffffffffn ? -1 : Number(got);
+        },
+        bind: sock("bind"), listen: sock("listen"), connect: sock("connect"),
+        accept: sock("accept", "socket"), send: sock("send"),
+        recv: sock("recv"), sendto: sock("sendto"), recvfrom: sock("recvfrom"),
+        setsockopt: sock("setsockopt"), getsockopt: sock("getsockopt"),
+        fcntl, select: lib.select,
+        close: sock("closesocket"),
+        errno: () => codes[lib.WSAGetLastError()] ?? 5,
+        strerror: (code) => ({ 2: "No such file or directory",
+          5: "Input/output error", 9: "Bad file descriptor",
+          11: "Resource temporarily unavailable", 13: "Permission denied",
+          17: "File exists", 20: "Not a directory", 21: "Is a directory",
+          22: "Invalid argument", 24: "Too many open files",
+          28: "No space left on device", 32: "Broken pipe",
+          75: "Value too large for defined data type",
+          98: "Address already in use", 99: "Cannot assign requested address",
+          101: "Network is unreachable", 104: "Connection reset by peer",
+          110: "Connection timed out", 111: "Connection refused",
+          113: "No route to host" })[code] ?? "Unknown error" };
+      globalThis.BEND_SYS.again = 11;
+      globalThis.BEND_SYS.inprogress = 11;
+      globalThis.BEND_SYS.select_ready = (read, write, ms) => {
+        if (read.length === 0 && write.length === 0) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0,
+            ms < 0 ? undefined : ms);
+          return [[], []];
+        }
+        const pack = (xs) => {
+          const b = new BigUint64Array(1 + xs.length);
+          b[0] = BigInt(xs.length);
+          xs.forEach((x, i) => { b[i + 1] = BigInt(x); });
+          return b;
+        };
+        const r = pack(read), w = pack(write), t = new Int32Array(2);
+        if (ms >= 0) { t[0] = Math.floor(ms / 1000); t[1] = (ms % 1000) * 1000; }
+        const n = lib.select(0, ffi.ptr(r), ffi.ptr(w), null,
+          ms < 0 ? null : ffi.ptr(t));
+        if (n < 0) return null;
+        return [Array.from(r.slice(1, Number(r[0]) + 1), Number),
+          Array.from(w.slice(1, Number(w[0]) + 1), Number)];
+      };
+      return globalThis.BEND_SYS;
+    }
     const err = mac ? "__error" : "__errno_location";
     const sel = mac ? "select$DARWIN_EXTSN" : "select";
     const T = { i: "i32", u: "u32", U: "u64", I: "i64", p: "ptr",
@@ -6283,9 +6754,10 @@ function io_sys() {
     const fcntl = (fd, cmd, arg) => vari
       ? lib.fcntl(fd, cmd, 0, 0, 0, 0, 0, 0, arg)
       : lib.fcntl(fd, cmd, arg);
-    globalThis.BEND_SYS = { ...lib, fcntl, select: lib[sel],
-      ptr: ffi.ptr, mac,
-      errno: () => ffi.read.i32(lib[err](), 0) };
+      globalThis.BEND_SYS = { ...lib, fcntl, select: lib[sel],
+        ptr: ffi.ptr, mac, win: false, again: mac ? 35 : 11,
+        inprogress: mac ? 36 : 115,
+        errno: () => ffi.read.i32(lib[err](), 0) };
   }
   return globalThis.BEND_SYS;
 }
@@ -6352,6 +6824,21 @@ function io_wait(io) {
   const ms = soon === Infinity ? -1
     : Math.max(0, Math.ceil(soon - performance.now()));
   const fds = io.waits.filter((w) => w.fd !== undefined);
+  const sys = io_sys();
+  if (sys.win) {
+    const ready = sys.select_ready(fds.filter((w) => !w.out).map((w) => w.fd),
+      fds.filter((w) => w.out).map((w) => w.fd), ms);
+    if (ready === null) throw "bend: the poller failed";
+    const now = performance.now();
+    const reads = new Set(ready[0]), writes = new Set(ready[1]);
+    io.waits = io.waits.filter((w) => {
+      const readyNow = w.at <= now || w.fd !== undefined
+        && (w.out ? writes : reads).has(w.fd);
+      if (readyNow) io_push(io_wake, w, false);
+      return !readyNow;
+    });
+    return;
+  }
   const top = fds.reduce((m, w) => Math.max(m, w.fd), 0);
   const len = (top >> 6 << 3) + 8;
   const set = new Uint8Array(2 * len);
@@ -6361,7 +6848,6 @@ function io_wait(io) {
   }
   const tv = new BigInt64Array([BigInt(ms / 1000 | 0),
     BigInt(ms % 1000 * 1000)]);
-  const sys = io_sys();
   if (sys.select(top + 1, sys.ptr(set), sys.ptr(set, len), null,
     ms < 0 ? null : sys.ptr(tv)) < 0) {
     if (sys.errno() !== 4) {

@@ -5,11 +5,12 @@
 // so EAGAIN) parks the computation until the socket is writable.
 static Term udp_send_to_more(Env e, IoWork* w) {
   struct sockaddr_in at;
-  int     fd = (int)w->hand;
+  IoSocket fd = (IoSocket)w->hand;
   ssize_t n  = -1;
   errno      = EINVAL;
   if (io_sys_addr(w->text, (u32)w->made, &at) == 0) {
-    n = sendto(fd, w->data, w->size, 0, (struct sockaddr*)&at, sizeof(at));
+    n = io_net_sendto(fd, w->data, w->size, 0, (struct sockaddr*)&at,
+      sizeof(at));
   }
   io_sys_end(w, n);
   if (w->code == EAGAIN) {

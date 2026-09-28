@@ -3,7 +3,13 @@
 
 static void file_read_call(IoWork* w) {
   int fd = (int)w->hand;
+#ifdef _WIN32
+  pthread_mutex_lock(&io_file_pos_lock);
+#endif
   w->size = io_sys_end(w, read(fd, w->data, w->word));
+#ifdef _WIN32
+  pthread_mutex_unlock(&io_file_pos_lock);
+#endif
 }
 
 static Term file_read_start(Term file, u64 max, IoWork* w,
@@ -60,7 +66,27 @@ static void __attribute__((constructor)) file_read_bytes_use(void) {
 // the file does not move.
 static void file_read_at_call(IoWork* w) {
   int fd = (int)w->hand;
+#ifdef _WIN32
+  pthread_mutex_lock(&io_file_pos_lock);
+  HANDLE h = (HANDLE)_get_osfhandle(fd);
+  LARGE_INTEGER zero = { 0 }, old = { 0 }, offset = { .QuadPart = (u64)w->made };
+  DWORD n = 0;
+  bool saved = h != INVALID_HANDLE_VALUE
+    && SetFilePointerEx(h, zero, &old, FILE_CURRENT);
+  bool ok = saved && SetFilePointerEx(h, offset, NULL, FILE_BEGIN)
+    && ReadFile(h, w->data, w->word, &n, NULL);
+  DWORD error = ok ? ERROR_SUCCESS
+    : h == INVALID_HANDLE_VALUE ? ERROR_INVALID_HANDLE : GetLastError();
+  if (saved) {
+    SetFilePointerEx(h, old, NULL, FILE_BEGIN);
+  }
+  if (!ok) errno = error == ERROR_ACCESS_DENIED || error == ERROR_INVALID_HANDLE
+    ? EBADF : EIO;
+  w->size = io_sys_end(w, ok ? (ssize_t)n : -1);
+  pthread_mutex_unlock(&io_file_pos_lock);
+#else
   w->size = io_sys_end(w, pread(fd, w->data, w->word, (off_t)w->made));
+#endif
 }
 
 Term file_read_at_run(Env e, Term* f, IoWork* w) {

@@ -10,7 +10,7 @@ function udp_poll(socket, max) {
   const got = sys.recvfrom(fd, sys.ptr(b), Number(max), 0, sys.ptr(peer),
     sys.ptr(len));
   const n = Number(got);
-  if (n < 0 && sys.errno() === (sys.mac ? 35 : 11)) {
+  if (n < 0 && sys.errno() === sys.again) {
     return io_tup(socket, io_done({ $: CID(None) }));
   }
   if (n < 0) {

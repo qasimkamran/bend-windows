@@ -5,10 +5,10 @@
 // that still finds no connection (the listener is non-blocking) parks
 // again. The accepted socket is non-blocking for life.
 static Term tcp_accept_more(Env e, IoWork* w) {
-  int fd  = (int)w->hand;
-  int got = accept(fd, NULL, NULL);
-  if (got >= 0 && fcntl(got, F_SETFL, fcntl(got, F_GETFL) | O_NONBLOCK) < 0) {
-    close(got);
+  IoSocket fd  = (IoSocket)w->hand;
+  IoSocket got = io_net_accept(fd, NULL, NULL);
+  if (got >= 0 && io_socket_nonblock(got) < 0) {
+    io_socket_close(got);
     got = -1;
   }
   io_sys_end(w, got);

@@ -3,11 +3,17 @@
 
 static void file_write_call(IoWork* w) {
   int fd = (int)w->hand;
+#ifdef _WIN32
+  pthread_mutex_lock(&io_file_pos_lock);
+#endif
   ssize_t n = 0;
   for (uint64_t at = 0; n >= 0 && at < w->size; at += (uint64_t)n) {
     n = write(fd, w->data + at, w->size - at);
   }
   io_sys_end(w, n);
+#ifdef _WIN32
+  pthread_mutex_unlock(&io_file_pos_lock);
+#endif
 }
 
 static Term file_write_pack(Env e, IoWork* w) {

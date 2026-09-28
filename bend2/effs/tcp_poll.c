@@ -11,9 +11,9 @@ static Term tcp_poll_end(Env e, IoWork* w, Term r) {
 }
 
 static Term tcp_poll_more(Env e, IoWork* w) {
-  int fd  = (int)w->hand;
+  IoSocket fd = (IoSocket)w->hand;
   u64 at  = w->time;
-  w->size = io_sys_end(w, recv(fd, w->data, (size_t)w->made, 0));
+  w->size = io_sys_end(w, io_net_recv(fd, w->data, (size_t)w->made, 0));
   if (w->code == EAGAIN) {
     return io_tick() < at ? io_wait_on(w, fd, POLLIN, at, tcp_poll_more)
       : tcp_poll_end(e, w, io_done(e, term_pak(CID(None), 0)));
@@ -29,7 +29,7 @@ Term tcp_poll_run(Env e, Term* f, IoWork* w) {
   }
   w->made = f[1] < INT32_MAX ? (intptr_t)f[1] : INT32_MAX;
   w->data = io_mem(malloc((size_t)w->made));
-  return io_wait_on(w, (int)w->hand, POLLIN,
+  return io_wait_on(w, w->hand, POLLIN,
     io_tick() + (u64)f[2] * 1000000ull, tcp_poll_more);
 }
 
