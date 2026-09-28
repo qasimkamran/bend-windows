@@ -5017,14 +5017,36 @@ static const char* gpu_path(void) {
 #ifdef __APPLE__
   _NSGetExecutablePath(path, &n);
 #elif defined(_WIN32)
-  n = GetModuleFileNameA(NULL, path, sizeof path - 8);
-  if (n == 0 || n >= sizeof path - 8) {
+  WCHAR wide[4096];
+  n = GetModuleFileNameW(NULL, wide, sizeof wide / sizeof wide[0]);
+  if (n == 0 || n >= sizeof wide / sizeof wide[0]
+    || WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1,
+      path, sizeof path - 8, NULL, NULL) <= 0) {
     return "bend.exe.gpu";
   }
 #else
   path[readlink("/proc/self/exe", path, n)] = 0;
 #endif
   return strcat(path, ".gpu");
+}
+
+static FILE* gpu_open(const char* path, bool write) {
+#ifdef _WIN32
+  int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+    NULL, 0);
+  if (n <= 0) return NULL;
+  WCHAR* wide = malloc((size_t)n * sizeof(WCHAR));
+  if (wide == NULL || MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+    path, -1, wide, n) != n) {
+    free(wide);
+    return NULL;
+  }
+  FILE* file = _wfopen(wide, write ? L"wb" : L"rb");
+  free(wide);
+  return file;
+#else
+  return fopen(path, write ? "wb" : "rb");
+#endif
 }
 
 static void gpu_note(const char* path) {
@@ -5250,7 +5272,7 @@ static bool gpu_make(const char* path) {
   }
   nvrtcDestroyProgram(&prog);
   u64   key = gpu_hash();
-  FILE* out = path == NULL ? NULL : fopen(path, "wb");
+  FILE* out = path == NULL ? NULL : gpu_open(path, true);
   bool  ok  = out != NULL && fwrite(&key, 8, 1, out) == 1
     && fwrite(bin, 1, len, out) == len && fclose(out) == 0;
   if (cuModuleLoadData(&gpu_lib, bin) != CUDA_SUCCESS) {
@@ -5269,7 +5291,7 @@ static u64 gpu_span(void) {
 static void gpu_load(u64 bytes) {
   const char* path = gpu_path();
 #ifdef _WIN32
-  FILE* in = fopen(path, "rb");
+  FILE* in = gpu_open(path, false);
   u64   key = 0;
   long  len = -1;
   char* bin = NULL;
