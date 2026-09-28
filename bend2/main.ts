@@ -426,12 +426,13 @@ function cli_build(bin: string, file: string): void {
   const bangs = !/^#define BANGS\s+0$/m.test(c)
     && (mac || fs.existsSync(cuda + "/include/nvrtc.h"));
   const cc    = cc_find(bangs);
+  const win   = process.platform === "win32" || /w64-mingw32/.test(cc);
   const objc  = mac && (bangs || /^#import /m.test(c))
     ? ["-x", "objective-c", "-fobjc-arc", "-fmodules"] : [];
   const libs  = [["X11", "X11"], ["alsa", "asound"]].flatMap(([h, l]) =>
-    !mac && c.includes("#include <" + h + "/") ? ["-l" + l] : []);
+    !mac && !win && c.includes("#include <" + h + "/") ? ["-l" + l] : []);
   const cpu = [...objc, "-std=c11", "-O3", file, "-lpthread", "-lm",
-    ...libs, "-o", path.resolve(bin)];
+    ...win ? ["-lws2_32"] : [], ...libs, "-o", path.resolve(bin)];
   const gpu = mac ? ["-DBEND_METAL=1", ...cpu]
     : ["-DBEND_CUDA=1", "-I" + cuda + "/include", "-L" + cuda + "/lib64",
       "-L" + cuda + "/lib", ...cpu, "-lcuda", "-lnvrtc"];

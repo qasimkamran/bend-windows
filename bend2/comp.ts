@@ -3419,6 +3419,7 @@ using namespace metal;
 #endif
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <winsock2.h>
 #include <windows.h>
 #include <io.h>
@@ -3426,12 +3427,6 @@ using namespace metal;
 #define MAP_FAILED ((void*)(intptr_t)-1)
 #define SIGPIPE 13
 #define munmap(p, n) (VirtualFree((p), 0, MEM_RELEASE) ? 0 : -1)
-#else
-#include <unistd.h>
-#include <signal.h>
-#include <sys/mman.h>
-#include <poll.h>
-#include <sys/select.h>
 #endif
 #include <stdint.h>
 #include <stdbool.h>
@@ -3442,7 +3437,16 @@ using namespace metal;
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
+#ifndef _WIN32
+#include <unistd.h>
+#include <signal.h>
+#include <sys/mman.h>
+#endif
 #include <time.h>
+#ifndef _WIN32
+#include <poll.h>
+#include <sys/select.h>
+#endif
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
