@@ -12,6 +12,9 @@
 #import <AudioToolbox/AudioToolbox.h>
 #elif defined(__linux__)
 #include <alsa/asoundlib.h>
+#elif defined(_WIN32)
+#include <mmsystem.h>
+#include <mmreg.h>
 #endif
 
 typedef struct {
@@ -21,6 +24,10 @@ typedef struct {
   AudioUnit    unit;
 #elif defined(__linux__)
   snd_pcm_t*   unit;
+  pthread_t    pump;
+  _Atomic(u32) done;
+#elif defined(_WIN32)
+  HWAVEOUT     unit;
   pthread_t    pump;
   _Atomic(u32) done;
 #endif
@@ -146,6 +153,58 @@ static void io_ring_free(IoRing* p) {
       pthread_join(p->pump, NULL);
     }
     snd_pcm_close(p->unit);
+  }
+  free(p);
+}
+
+#elif defined(_WIN32)
+
+static void* io_ring_pump(void* ctx) {
+  IoRing* p = ctx;
+  struct {
+    WAVEHDR hdr;
+    float   pcm[256 * 2];
+    bool    busy;
+  } block[2] = { 0 };
+  for (u32 i = 0; i < 2; i += 1) {
+    block[i].hdr.lpData = (LPSTR)block[i].pcm;
+    block[i].hdr.dwBufferLength = sizeof block[i].pcm;
+    waveOutPrepareHeader(p->unit, &block[i].hdr, sizeof(WAVEHDR));
+  }
+  u32 at = 0;
+  while (atomic_load_explicit(&p->done, memory_order_relaxed) == 0) {
+    if (!block[at].busy || (block[at].hdr.dwFlags & WHDR_DONE)) {
+      io_ring_pull(p, block[at].pcm, 256);
+      block[at].busy = waveOutWrite(p->unit, &block[at].hdr,
+        sizeof(WAVEHDR)) == MMSYSERR_NOERROR;
+      at = (at + 1) % 2;
+    } else {
+      Sleep(1);
+    }
+  }
+  waveOutReset(p->unit);
+  for (u32 i = 0; i < 2; i += 1) {
+    waveOutUnprepareHeader(p->unit, &block[i].hdr, sizeof(WAVEHDR));
+  }
+  return NULL;
+}
+
+static u32 io_ring_start(IoRing* p, u32 rate) {
+  WAVEFORMATEX fmt = { WAVE_FORMAT_IEEE_FLOAT, 2, rate, rate * 8, 8, 32, 0 };
+  if (waveOutOpen(&p->unit, WAVE_MAPPER, &fmt, 0, 0, CALLBACK_NULL)
+    != MMSYSERR_NOERROR || pthread_create(&p->pump, NULL, io_ring_pump, p)) {
+    if (p->unit != NULL) waveOutClose(p->unit);
+    p->unit = NULL;
+    return ENODEV;
+  }
+  return 0;
+}
+
+static void io_ring_free(IoRing* p) {
+  if (p->unit != NULL) {
+    atomic_store_explicit(&p->done, 1, memory_order_relaxed);
+    pthread_join(p->pump, NULL);
+    waveOutClose(p->unit);
   }
   free(p);
 }

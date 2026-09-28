@@ -30,6 +30,20 @@ typedef struct {
   u32      grab;
 } BendWin;
 
+#elif defined(_WIN32)
+
+#include <windowsx.h>
+#include <wctype.h>
+
+typedef struct {
+  HWND  win;
+  HDC   dc;
+  HBITMAP bmp;
+  u32*  pix;
+  u32   w, h, n, cap, *evs;
+  u32   grab, warp;
+} BendWin;
+
 #endif
 
 #ifdef CID(Window.open)
@@ -280,6 +294,185 @@ static u32 window_make(const char* title, u32 w, u32 h, intptr_t* out,
   return 0;
 }
 
+#elif defined(_WIN32)
+
+static void window_push(BendWin* win, u32 cid, u32 a, u32 b, u32 c, u32 d) {
+  if (win->n == win->cap) {
+    win->cap = win->cap == 0 ? 64 : win->cap * 2;
+    win->evs = io_mem(realloc(win->evs, win->cap * 20));
+  }
+  u32 ev[5] = { cid, a, b, c, d };
+  memcpy(win->evs + win->n * 5, ev, sizeof ev);
+  win->n += 1;
+}
+
+static u32 window_clip(int v, u32 most) {
+  return v < 0 ? 0 : (u32)v < most ? (u32)v : most - 1;
+}
+
+static u32 window_key(WPARAM key, LPARAM data) {
+  static const u32 keys[][2] = {
+    { VK_BACK, 127 }, { VK_UP, 63232 }, { VK_DOWN, 63233 },
+    { VK_LEFT, 63234 }, { VK_RIGHT, 63235 }, { VK_INSERT, 63271 },
+    { VK_DELETE, 63272 }, { VK_HOME, 63273 }, { VK_END, 63275 },
+    { VK_PRIOR, 63276 }, { VK_NEXT, 63277 }, { VK_ESCAPE, 27 },
+    { VK_RETURN, 13 }, { VK_TAB, 9 }, { VK_LWIN, 65590 },
+    { VK_RWIN, 65591 }, { VK_LSHIFT, 65592 }, { VK_CAPITAL, 65593 },
+    { VK_LMENU, 65594 }, { VK_LCONTROL, 65595 }, { VK_RSHIFT, 65596 },
+    { VK_RMENU, 65597 }, { VK_RCONTROL, 65598 },
+  };
+  for (u32 i = 0; i < sizeof keys / sizeof *keys; i += 1) {
+    if (keys[i][0] == key) return keys[i][1];
+  }
+  if (key >= VK_F1 && key <= VK_F12) return 63236 + key - VK_F1;
+  BYTE state[256];
+  WCHAR text[4];
+  GetKeyboardState(state);
+  int n = ToUnicode((UINT)key, (UINT)((data >> 16) & 255), state, text, 4, 0);
+  if (n == 1) return (u32)towlower(text[0]);
+  return 65536 + (u32)key;
+}
+
+static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  BendWin* win = (BendWin*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+  if (msg == WM_NCCREATE) {
+    CREATESTRUCTW* cs = (CREATESTRUCTW*)lp;
+    win = cs->lpCreateParams;
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)win);
+    win->win = hwnd;
+  }
+  if (win == NULL) return DefWindowProcW(hwnd, msg, wp, lp);
+  if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN || msg == WM_KEYUP
+    || msg == WM_SYSKEYUP) {
+    window_push(win, CID(Key), window_key(wp, lp),
+      msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN, 0, 0);
+    return 0;
+  }
+  if (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN
+    || msg == WM_XBUTTONDOWN || msg == WM_LBUTTONUP || msg == WM_RBUTTONUP
+    || msg == WM_MBUTTONUP || msg == WM_XBUTTONUP) {
+    bool down = msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN
+      || msg == WM_MBUTTONDOWN || msg == WM_XBUTTONDOWN;
+    u32 button = msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ? 0
+      : msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ? 1
+      : msg == WM_MBUTTONDOWN || msg == WM_MBUTTONUP ? 2
+      : GET_XBUTTON_WPARAM(wp) == XBUTTON1 ? 3 : 4;
+    if (down) SetCapture(hwnd);
+    else if ((wp & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON)) == 0) ReleaseCapture();
+    window_push(win, CID(Mouse), window_clip(GET_X_LPARAM(lp), win->w),
+      window_clip(GET_Y_LPARAM(lp), win->h), button, down);
+    return TRUE;
+  }
+  if (msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL) {
+    POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+    ScreenToClient(hwnd, &pt);
+    f32 step = f32_rewrap((f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA);
+    window_push(win, CID(Scroll), window_clip(pt.x, win->w),
+      window_clip(pt.y, win->h), msg == WM_MOUSEHWHEEL ? step : 0,
+      msg == WM_MOUSEWHEEL ? step : 0);
+    return 0;
+  }
+  if (msg == WM_MOUSEMOVE) {
+    int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+    if (win->grab) {
+      if (win->warp && x == (int)win->w / 2 && y == (int)win->h / 2) {
+        win->warp = 0;
+        return 0;
+      }
+      window_push(win, CID(Look), f32_rewrap(x - (int)win->w / 2),
+        f32_rewrap(y - (int)win->h / 2), 0, 0);
+      POINT pt = { (int)win->w / 2, (int)win->h / 2 };
+      ClientToScreen(hwnd, &pt);
+      win->warp = 1;
+      SetCursorPos(pt.x, pt.y);
+    } else {
+      window_push(win, CID(Move), window_clip(x, win->w),
+        window_clip(y, win->h), 0, 0);
+    }
+    return 0;
+  }
+  if (msg == WM_GETMINMAXINFO) {
+    LPMINMAXINFO m = (LPMINMAXINFO)lp;
+    RECT r = { 0, 0, (LONG)win->w, (LONG)win->h };
+    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+    m->ptMinTrackSize.x = m->ptMaxTrackSize.x = r.right - r.left;
+    m->ptMinTrackSize.y = m->ptMaxTrackSize.y = r.bottom - r.top;
+    return 0;
+  }
+  if (msg == WM_KILLFOCUS && win->grab) {
+    win->grab = 0;
+    ClipCursor(NULL);
+    while (ShowCursor(TRUE) < 0) {}
+  }
+  if (msg == WM_CLOSE) {
+    window_push(win, CID(Close), 0, 0, 0, 0);
+    return 0;
+  }
+  if (msg == WM_ERASEBKGND) return 1;
+  return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static u32 window_make(const char* title, u32 w, u32 h, intptr_t* out,
+  const char** why) {
+  if (w < 1 || h < 1 || w > 16384 || h > 16384) return EINVAL;
+  static const WCHAR name[] = L"BendWindow";
+  static ATOM cls;
+  if (!cls) {
+    WNDCLASSW c = { 0 };
+    c.lpfnWndProc = window_proc;
+    c.hInstance = GetModuleHandleW(NULL);
+    c.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512));
+    c.lpszClassName = name;
+    cls = RegisterClassW(&c);
+    if (!cls && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+      *why = "Window.open: could not register window class";
+      return ENOTSUP;
+    }
+  }
+  int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, title, -1,
+    NULL, 0);
+  if (n <= 0) return EILSEQ;
+  WCHAR* text = io_mem(malloc((size_t)n * sizeof(WCHAR)));
+  MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, title, -1, text, n);
+  BendWin* win = io_mem(calloc(1, sizeof(BendWin)));
+  win->w = w;
+  win->h = h;
+  RECT r = { 0, 0, (LONG)w, (LONG)h };
+  AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+  win->win = CreateWindowExW(0, name, text, WS_OVERLAPPEDWINDOW,
+    CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
+    NULL, NULL, GetModuleHandleW(NULL), win);
+  free(text);
+  if (!win->win) {
+    free(win);
+    *why = "Window.open: could not create window";
+    return ENOTSUP;
+  }
+  BITMAPINFO info = { 0 };
+  info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  info.bmiHeader.biWidth = w;
+  info.bmiHeader.biHeight = -(LONG)h;
+  info.bmiHeader.biPlanes = 1;
+  info.bmiHeader.biBitCount = 32;
+  info.bmiHeader.biCompression = BI_RGB;
+  win->dc = CreateCompatibleDC(NULL);
+  win->bmp = CreateDIBSection(win->dc, &info, DIB_RGB_COLORS,
+    (void**)&win->pix, NULL, 0);
+  if (!win->dc || !win->bmp || !win->pix) {
+    if (win->dc) DeleteDC(win->dc);
+    if (win->bmp) DeleteObject(win->bmp);
+    DestroyWindow(win->win);
+    free(win);
+    *why = "Window.open: could not create frame buffer";
+    return ENOMEM;
+  }
+  SelectObject(win->dc, win->bmp);
+  ShowWindow(win->win, SW_SHOW);
+  UpdateWindow(win->win);
+  *out = (intptr_t)win;
+  return 0;
+}
+
 #else
 
 static u32 window_make(const char* title, u32 w, u32 h, intptr_t* out,
@@ -314,7 +507,7 @@ static void __attribute__((constructor)) window_open_use(void) {
 
 // An event is five words: its constructor's id and its fields; a frame
 // answers the events pumped since the last one.
-#if defined(__OBJC__) || defined(__linux__)
+#if defined(__OBJC__) || defined(__linux__) || defined(_WIN32)
 
 static Term window_node(Env e, const u32* ev) {
   u32 n = cid_arity(ev[0]);
@@ -691,6 +884,81 @@ static Term window_frame(Env e, intptr_t at, Term image) {
   return list;
 }
 
+#elif defined(_WIN32)
+
+#if BEND_CUDA
+static CUfunction  window_pso;
+static CUdeviceptr window_buf;
+static u64         window_len;
+#endif
+
+static void window_sq(u64* H, u32* pix, u32 w, u32 h, Term t, u32 s,
+  u32 x, u32 y) {
+  if (x >= w || y >= h) return;
+  if (s > 1 && term_tag(t) == TAG_CTR) {
+    u64 l = term_peek(H, t);
+    s /= 2;
+    for (u32 j = 0; j < 4; j += 1)
+      window_sq(H, pix, w, h, H[l + j], s, x + j % 2 * s, y + j / 2 * s);
+    return;
+  }
+  u32 c = window_pix(H, t, 0, 0, 0);
+  for (u32 i = y; i < h && i < y + s; i += 1)
+    for (u32 j = x; j < w && j < x + s; j += 1) pix[i * w + j] = c;
+}
+
+static void window_fill(Env e, BendWin* win, Term image) {
+  u32 w = win->w, h = win->h;
+  u32 k = 0;
+  while ((1u << k) < w || (1u << k) < h) k += 1;
+#if BEND_CUDA
+  if (io_gpu) {
+    u64* H = e.mem;
+    u64 len = (u64)w * h * 4;
+    void* args[] = { &H, &image, &w, &h, &k, &window_buf };
+    if (window_pso == NULL && cuModuleGetFunction(&window_pso, gpu_lib,
+      "window_dev") != CUDA_SUCCESS) err_fail("cannot load the window kernel");
+    if (len > window_len) {
+      if (window_buf != 0) cuMemFree(window_buf);
+      if (cuMemAlloc(&window_buf, len) != CUDA_SUCCESS)
+        err_fail("the frame's device buffer failed");
+      window_len = len;
+    }
+    if (cuLaunchKernel(window_pso, (w + 31) / 32, (h + 7) / 8, 1, 32, 8, 1,
+      0, NULL, args, NULL) != CUDA_SUCCESS
+      || cuMemcpyDtoH(win->pix, window_buf, len) != CUDA_SUCCESS)
+      err_fail("the frame's device fill failed");
+    return;
+  }
+#endif
+  window_sq(e.mem, win->pix, w, h, image, 1u << k, 0, 0);
+}
+
+static void window_pace(void) {
+  static u64 due;
+  u64 now = io_tick();
+  if (due > now) Sleep((DWORD)((due - now + 999999ull) / 1000000ull));
+  due = (due > now ? due : now) + 16666667ull;
+}
+
+static Term window_frame(Env e, intptr_t at, Term image) {
+  BendWin* win = (BendWin*)at;
+  MSG msg;
+  while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+    TranslateMessage(&msg);
+    DispatchMessageW(&msg);
+  }
+  io_sync();
+  window_fill(e, win, image);
+  window_pace();
+  HDC dc = GetDC(win->win);
+  BitBlt(dc, 0, 0, win->w, win->h, win->dc, 0, 0, SRCCOPY);
+  ReleaseDC(win->win, dc);
+  Term list = window_list(e, win->evs, win->n);
+  win->n = 0;
+  return list;
+}
+
 #else
 
 static Term window_frame(Env e, intptr_t at, Term image) {
@@ -726,6 +994,19 @@ static void window_set_title(intptr_t at, const char* text, u64 n) {
   BendWin* win = (BendWin*)at;
   XStoreName(win->dpy, win->win, text);
   XFlush(win->dpy);
+}
+
+#elif defined(_WIN32)
+
+static void window_set_title(intptr_t at, const char* text, u64 n) {
+  int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text,
+    (int)n, NULL, 0);
+  if (len <= 0) return;
+  WCHAR* title = io_mem(malloc((size_t)(len + 1) * sizeof(WCHAR)));
+  MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, (int)n, title, len);
+  title[len] = 0;
+  SetWindowTextW(((BendWin*)at)->win, title);
+  free(title);
 }
 
 #else
@@ -789,6 +1070,35 @@ static void window_grab(intptr_t at, bool on) {
   XFlush(win->dpy);
 }
 
+#elif defined(_WIN32)
+
+static void window_grab(intptr_t at, bool on) {
+  BendWin* win = (BendWin*)at;
+  if (on == win->grab || (on && GetForegroundWindow() != win->win)) return;
+  win->grab = on;
+  if (on) {
+    RECT r;
+    POINT a = { 0, 0 }, b = { 0, 0 };
+    GetClientRect(win->win, &r);
+    b.x = r.right;
+    b.y = r.bottom;
+    ClientToScreen(win->win, &a);
+    ClientToScreen(win->win, &b);
+    RECT clip = { a.x, a.y, b.x, b.y };
+    ClipCursor(&clip);
+    SetCapture(win->win);
+    while (ShowCursor(FALSE) >= 0) {}
+    POINT c = { (int)win->w / 2, (int)win->h / 2 };
+    ClientToScreen(win->win, &c);
+    win->warp = 1;
+    SetCursorPos(c.x, c.y);
+  } else {
+    ClipCursor(NULL);
+    ReleaseCapture();
+    while (ShowCursor(TRUE) < 0) {}
+  }
+}
+
 #else
 
 static void window_grab(intptr_t at, bool on) {
@@ -823,6 +1133,22 @@ static void window_close(intptr_t at) {
   BendWin* win = (BendWin*)at;
   XDestroyImage(win->img);
   XCloseDisplay(win->dpy);
+  free(win->evs);
+  free(win);
+}
+
+#elif defined(_WIN32)
+
+static void window_close(intptr_t at) {
+  BendWin* win = (BendWin*)at;
+  if (win->grab) {
+    ClipCursor(NULL);
+    ReleaseCapture();
+    while (ShowCursor(TRUE) < 0) {}
+  }
+  DestroyWindow(win->win);
+  DeleteDC(win->dc);
+  DeleteObject(win->bmp);
   free(win->evs);
   free(win);
 }

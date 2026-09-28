@@ -4774,7 +4774,7 @@ extern "C" __global__ void bend_dev(DEV u64* H, u32 pass) {
 
 // Linux's window fill (the Mac's is window_msl): an Image is a quadtree over
 // 2^k x 2^k (Qua splits tl, tr, bl, br; Pix is 0xRRGGBB).
-#if defined(__linux__) || defined(BEND_RTC)
+#if defined(__linux__) || defined(_WIN32) || defined(BEND_RTC)
 
 INLINE u32 window_pix(DEV u64* H, Term t, u32 k, u32 x, u32 y) {
   for (u32 i = k; term_tag(t) == TAG_CTR;) {
@@ -4835,10 +4835,34 @@ static void row_grow(Env e, DEV Term* stk, u32 base, u32 stride, u32 want) {
 // Pool
 // ====
 
+#ifdef _WIN32
+static LONG CALLBACK pool_page_fault(EXCEPTION_POINTERS* e) {
+  EXCEPTION_RECORD* x = e->ExceptionRecord;
+  if (x->ExceptionCode != EXCEPTION_ACCESS_VIOLATION
+    || x->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
+  uintptr_t at = (uintptr_t)x->ExceptionInformation[1];
+  MEMORY_BASIC_INFORMATION info;
+  if (VirtualQuery((void*)at, &info, sizeof info) == sizeof info
+    && info.State == MEM_RESERVE) {
+    SYSTEM_INFO sys;
+    GetSystemInfo(&sys);
+    uintptr_t page = at & ~((uintptr_t)sys.dwPageSize - 1);
+    return VirtualAlloc((void*)page, sys.dwPageSize, MEM_COMMIT,
+      PAGE_READWRITE) == NULL ? EXCEPTION_CONTINUE_SEARCH
+      : EXCEPTION_CONTINUE_EXECUTION;
+  }
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
 static void* pool_try(void* at, u64 bytes) {
 #ifdef _WIN32
-  void* p = VirtualAlloc(at, (SIZE_T)bytes, MEM_RESERVE | MEM_COMMIT,
-    PAGE_READWRITE);
+  static bool fault_hook;
+  if (!fault_hook) {
+    if (AddVectoredExceptionHandler(1, pool_page_fault) == NULL) return MAP_FAILED;
+    fault_hook = true;
+  }
+  void* p = VirtualAlloc(at, (SIZE_T)bytes, MEM_RESERVE, PAGE_READWRITE);
   return p == NULL ? MAP_FAILED : p;
 #else
   return mmap(at, bytes, PROT_READ | PROT_WRITE,
@@ -4858,8 +4882,7 @@ static Term* pool_stack(void) {
   u64   len = 1ull << 31;
 #ifdef _WIN32
   char* p = pool_mmap(len + 16384);
-  DWORD old;
-  if (!VirtualProtect(p + len, 16384, PAGE_NOACCESS, &old)) {
+  if (VirtualAlloc(p + len, 16384, MEM_COMMIT, PAGE_NOACCESS) == NULL) {
     err_fail("stack guard failed");
   }
 #else
@@ -5477,7 +5500,9 @@ typedef Term (*IoPack)(Env e, struct IoWork* w);
 typedef struct IoWork {
   intptr_t       hand;
   intptr_t       made;
+#ifdef _WIN32
   intptr_t       pollfd;
+#endif
   u32            word;
   u64            size;
   char*          data;
@@ -5727,7 +5752,11 @@ static void io_park_add(IoWork* w) {
 
 static Term io_wait_on(IoWork* w, intptr_t fd, short evts, u64 time,
   IoPack more) {
+#ifdef _WIN32
   w->pollfd = fd;
+#else
+  w->word = (u32)fd;
+#endif
   w->pack = more;
   w->time = time;
   w->evts = evts;
@@ -6054,8 +6083,8 @@ static void io_wait(Env e) {
     if (a->time != 0 && (soon == 0 || a->time < soon)) {
       soon = a->time;
     }
-    if (a->evts != 0 && (int)a->pollfd > top) {
-      top = (int)a->pollfd;
+    if (a->evts != 0 && (int)a->word > top) {
+      top = (int)a->word;
     }
   }
   u64 len = (u64)top / 64 * 8 + 8;
@@ -6065,7 +6094,7 @@ static void io_wait(Env e) {
   for (IoWork* a = io_park; a != NULL;
     a = a->next != io_park ? a->next : NULL) {
     if (a->evts != 0) {
-      io_bit(set[a->evts == POLLOUT], (int)a->pollfd, true);
+      io_bit(set[a->evts == POLLOUT], (int)a->word, true);
     }
   }
   u64 tick = io_tick();
@@ -6088,7 +6117,7 @@ static void io_wait(Env e) {
   while (todo != NULL) {
     IoWork* a   = io_pop(&todo);
     bool    due = (a->evts != 0
-        && io_bit(set[a->evts == POLLOUT], (int)a->pollfd, false))
+        && io_bit(set[a->evts == POLLOUT], (int)a->word, false))
       || (a->time != 0 && a->time <= now);
     if (!due) {
       io_park_add(a);
@@ -6260,7 +6289,11 @@ static void io_step(Env e, IoWork* a) {
       err_fail("an alien request");
     }
     u32 need = io_eff_rows[c].ask;
+#ifdef _WIN32
     u64 word = need & IO_READ ? io_hand_v(e.mem[at]) : e.mem[at];
+#else
+    u32 word = (u32)(need & IO_READ ? io_hand_v(e.mem[at]) : e.mem[at]);
+#endif
     a->cont  = req;
     if (need != 0) {
       io_wait_on(a, (intptr_t)word, need & IO_READ ? POLLIN : 0,

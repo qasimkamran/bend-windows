@@ -368,15 +368,22 @@ function cli_emit(book: Bend.Book, out: string): void {
       cli_say(2, "BendTT: out of scope, so not in " + out + ":\n" + oos.join(""));
     }
   } else {
+    const win = target_win();
+    const bin = win && path.extname(out) === "" ? out + ".exe" : out;
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bend-"));
-    const c   = path.join(dir, path.basename(out) + ".c");
+    const c   = path.join(dir, path.basename(bin) + ".c");
     fs.writeFileSync(c, Comp.compile_book(book));
     try {
-      cli_build(out, c);
+      cli_build(bin, c);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   }
+}
+
+function target_win(): boolean {
+  return process.platform === "win32"
+    || /w64-mingw32/.test(process.env.CC ?? "");
 }
 
 // cc_find is the first of $CC, clang and every clang-NN on PATH (newest
@@ -422,7 +429,9 @@ function cc_find(gpu: boolean): string {
 function cli_build(bin: string, file: string): void {
   const c     = fs.readFileSync(file, "utf8");
   const mac   = process.platform === "darwin";
-  const cuda  = process.env.CUDA_HOME || "/usr/local/cuda";
+  const wincc = target_win();
+  const cuda  = process.env.CUDA_HOME || process.env.CUDA_PATH
+    || (wincc ? "" : "/usr/local/cuda");
   const bangs = !/^#define BANGS\s+0$/m.test(c)
     && (mac || fs.existsSync(cuda + "/include/nvrtc.h"));
   const cc    = cc_find(bangs);
@@ -432,8 +441,12 @@ function cli_build(bin: string, file: string): void {
   const libs  = [["X11", "X11"], ["alsa", "asound"]].flatMap(([h, l]) =>
     !mac && !win && c.includes("#include <" + h + "/") ? ["-l" + l] : []);
   const cpu = [...objc, "-std=c11", "-O3", file, "-lpthread", "-lm",
-    ...win ? ["-lws2_32", "-lbcrypt"] : [], ...libs, "-o", path.resolve(bin)];
+    ...win ? ["-lws2_32", "-lbcrypt", "-lwinmm", "-luser32", "-lgdi32"]
+      : [], ...libs,
+    "-o", path.resolve(bin)];
   const gpu = mac ? ["-DBEND_METAL=1", ...cpu]
+    : win ? ["-DBEND_CUDA=1", "-I" + cuda + "/include",
+      "-L" + cuda + "/lib/x64", ...cpu, "-lcuda", "-lnvrtc"]
     : ["-DBEND_CUDA=1", "-I" + cuda + "/include", "-L" + cuda + "/lib64",
       "-L" + cuda + "/lib", ...cpu, "-lcuda", "-lnvrtc"];
   const steps: [string, string[]][] = bangs
@@ -623,7 +636,11 @@ async function cli_login(): Promise<string> {
   }
   cli_say(2, "log in at " + st.verify_url + "\n");
   try {
-    Bun.spawn([process.platform === "darwin" ? "open" : "xdg-open", st.verify_url], { stdout: "ignore", stderr: "ignore" });
+    const cmd = process.platform === "darwin" ? ["open", st.verify_url]
+      : process.platform === "win32"
+        ? ["rundll32.exe", "url.dll,FileProtocolHandler", st.verify_url]
+        : ["xdg-open", st.verify_url];
+    Bun.spawn(cmd, { stdout: "ignore", stderr: "ignore" });
   } catch {}
   const until = Date.parse(st.expires_at ?? "") || Date.now() + 600000;
   while (Date.now() < until) {
