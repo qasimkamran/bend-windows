@@ -3,6 +3,19 @@
 Each release names what changed for a user. `bend update` installs the
 latest one; the GitHub release carries the same notes.
 
+## Windows Preview 3 (2026-09-28)
+
+- **Windows foreign C builds can use dynamic loading**: the bundled
+  `dlfcn.h` maps `dlopen`, `dlsym`, `dlclose`, and `dlerror` to the Windows
+  loader, and the C compiler adds Bend's effects directory to its include
+  path. This fixes `dlfcn.h` missing errors when compiling programs that use
+  foreign C.
+- **Windows runtime stability**: retry transient thread pool page faults,
+  addressing intermittent stack overflow faults with multiple CPU threads.
+- **Local branch installs**: `install.ps1 -Local` installs the current
+  checkout's branch commit, including uncommitted-independent commits already
+  on that branch.
+
 ## 2.0.32 (2026-09-27)
 
 - **One verdict: `ALL PROOFS CHECK` or `SOME PROOFS FAIL`**: `bend f.bend`
