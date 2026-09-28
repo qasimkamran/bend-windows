@@ -3414,8 +3414,24 @@ using namespace metal;
 #elif !defined(BEND_RTC)
 #ifdef __APPLE__
 #define _DARWIN_UNLIMITED_SELECT
-#else
+#elif !defined(_WIN32)
 #define _GNU_SOURCE
+#endif
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <windows.h>
+#include <io.h>
+#include <unistd.h>
+#define MAP_FAILED ((void*)(intptr_t)-1)
+#define SIGPIPE 13
+#define munmap(p, n) (VirtualFree((p), 0, MEM_RELEASE) ? 0 : -1)
+#else
+#include <unistd.h>
+#include <signal.h>
+#include <sys/mman.h>
+#include <poll.h>
+#include <sys/select.h>
 #endif
 #include <stdint.h>
 #include <stdbool.h>
@@ -3426,12 +3442,7 @@ using namespace metal;
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
-#include <unistd.h>
-#include <signal.h>
-#include <sys/mman.h>
 #include <time.h>
-#include <poll.h>
-#include <sys/select.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
@@ -3498,6 +3509,9 @@ using namespace metal;
 #define CLZ(x)  (u32)__builtin_clz(x)
 #define FENCE() ((void)0)
 #endif
+#endif
+#ifdef _WIN32
+#undef FAR
 #endif
 #define FAR static __attribute__((noinline))
 
@@ -3843,6 +3857,13 @@ static void err_post(u64* H, u32 code) {
 static void err_trap(int sig) {
   err_post(NULL, ERR_DEEP);
 }
+
+#ifdef _WIN32
+static LONG WINAPI err_exception(EXCEPTION_POINTERS* e) {
+  err_trap((int)e->ExceptionRecord->ExceptionCode);
+  return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
 
 #endif
 
@@ -4811,8 +4832,14 @@ static void row_grow(Env e, DEV Term* stk, u32 base, u32 stride, u32 want) {
 // ====
 
 static void* pool_try(void* at, u64 bytes) {
+#ifdef _WIN32
+  void* p = VirtualAlloc(at, (SIZE_T)bytes, MEM_RESERVE | MEM_COMMIT,
+    PAGE_READWRITE);
+  return p == NULL ? MAP_FAILED : p;
+#else
   return mmap(at, bytes, PROT_READ | PROT_WRITE,
     MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+#endif
 }
 
 static void* pool_mmap(u64 bytes) {
@@ -4825,6 +4852,13 @@ static void* pool_mmap(u64 bytes) {
 
 static Term* pool_stack(void) {
   u64   len = 1ull << 31;
+#ifdef _WIN32
+  char* p = pool_mmap(len + 16384);
+  DWORD old;
+  if (!VirtualProtect(p + len, 16384, PAGE_NOACCESS, &old)) {
+    err_fail("stack guard failed");
+  }
+#else
   char* p   = pool_mmap(len + 16384 + SIGSTKSZ);
   if (mprotect(p + len, 16384, PROT_NONE) != 0) {
     err_fail("stack guard failed");
@@ -4834,6 +4868,7 @@ static Term* pool_stack(void) {
   struct sigaction sa = { .sa_handler = err_trap, .sa_flags = SA_ONSTACK };
   sigaction(SIGSEGV, &sa, NULL);
   sigaction(SIGBUS, &sa, NULL);
+#endif
   return (Term*)p;
 }
 
@@ -4898,6 +4933,11 @@ static int cpu_read(const char* path, long* a, long* b) {
 }
 
 static long cpu_count(void) {
+#ifdef _WIN32
+  SYSTEM_INFO info;
+  GetSystemInfo(&info);
+  return (long)info.dwNumberOfProcessors;
+#else
   long n = sysconf(_SC_NPROCESSORS_ONLN);
 #ifdef __linux__
   cpu_set_t set;
@@ -4915,6 +4955,7 @@ static long cpu_count(void) {
   }
 #endif
   return n;
+#endif
 }
 
 OUTLINE void pool_turn(bool grow) {
@@ -4945,6 +4986,11 @@ static const char* gpu_path(void) {
   u32 n = sizeof path - 8;
 #ifdef __APPLE__
   _NSGetExecutablePath(path, &n);
+#elif defined(_WIN32)
+  n = GetModuleFileNameA(NULL, path, sizeof path - 8);
+  if (n == 0 || n >= sizeof path - 8) {
+    return "bend.exe.gpu";
+  }
 #else
   path[readlink("/proc/self/exe", path, n)] = 0;
 #endif
@@ -5402,11 +5448,16 @@ OUTLINE Term corpus_eval(u64* H, Term t) {
 // macOS poll misses FIFO EOF, so io_wait selects, its sets sized to the
 // highest fd (_DARWIN_UNLIMITED_SELECT allows fds past FD_SETSIZE).
 
+#ifdef _WIN32
+#include <ws2tcpip.h>
+typedef int socklen_t;
+#else
 #include <arpa/inet.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#endif
+#include <errno.h>
+#include <fcntl.h>
 
 #define IO_READ 1
 #define IO_TIME 2
@@ -5447,9 +5498,17 @@ static IoEff io_eff_rows[1 << 16];
 static u32   io_live;
 
 static u64 io_tick(void) {
+#ifdef _WIN32
+  LARGE_INTEGER now, freq;
+  QueryPerformanceCounter(&now);
+  QueryPerformanceFrequency(&freq);
+  return (u64)(now.QuadPart / freq.QuadPart) * 1000000000ull
+    + (u64)(now.QuadPart % freq.QuadPart) * 1000000000ull / freq.QuadPart;
+#else
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (u64)ts.tv_sec * 1000000000ull + (u64)ts.tv_nsec;
+#endif
 }
 
 OUTLINE void* io_mem(void* mem) {
@@ -5691,12 +5750,53 @@ static pthread_mutex_t io_gate = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  io_bell = PTHREAD_COND_INITIALIZER;
 static u32             io_busy;
 static u32             io_size;
+#ifdef _WIN32
+static SOCKET          io_wake_fd[2] = { INVALID_SOCKET, INVALID_SOCKET };
+
+static int io_wake_open(void) {
+  WSADATA data;
+  if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return -1;
+  SOCKET a = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  SOCKET b = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  struct sockaddr_in aa = { .sin_family = AF_INET,
+    .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+  struct sockaddr_in bb = aa;
+  int n = sizeof aa;
+  if (a == INVALID_SOCKET || b == INVALID_SOCKET || bind(a,
+    (struct sockaddr*)&aa, sizeof aa) == SOCKET_ERROR || getsockname(a,
+    (struct sockaddr*)&aa, &n) == SOCKET_ERROR || bind(b,
+    (struct sockaddr*)&bb, sizeof bb) == SOCKET_ERROR || getsockname(b,
+    (struct sockaddr*)&bb, &n) == SOCKET_ERROR || connect(a,
+    (struct sockaddr*)&bb, sizeof bb) == SOCKET_ERROR || connect(b,
+    (struct sockaddr*)&aa, sizeof aa) == SOCKET_ERROR) {
+    if (a != INVALID_SOCKET) closesocket(a);
+    if (b != INVALID_SOCKET) closesocket(b);
+    return -1;
+  }
+  u_long nonblock = 1;
+  if (ioctlsocket(a, FIONBIO, &nonblock) == SOCKET_ERROR
+    || ioctlsocket(b, FIONBIO, &nonblock) == SOCKET_ERROR) {
+    closesocket(a);
+    closesocket(b);
+    return -1;
+  }
+  io_wake_fd[0] = a;
+  io_wake_fd[1] = b;
+  return 0;
+}
+#else
 static int             io_wake_fd[2];
+#endif
 
 static void io_take(Env e) {
   IoWork* acts[64];
+#ifdef _WIN32
+  int n;
+  while ((n = recv(io_wake_fd[0], (char*)acts, sizeof acts, 0)) > 0) {
+#else
   ssize_t n;
   while ((n = read(io_wake_fd[0], acts, sizeof acts)) > 0) {
+#endif
     for (u32 i = 0; i < (u32)n / sizeof(IoWork*); i += 1) {
       IoWork* a = acts[i];
       a->item   = a->pack(e, a);
@@ -5715,7 +5815,11 @@ static void* io_help(void* arg) {
     IoWork* a = io_pop(&io_jobs);
     pthread_mutex_unlock(&io_gate);
     a->call(a);
+#ifdef _WIN32
+    while (send(io_wake_fd[1], (const char*)&a, sizeof a, 0) == SOCKET_ERROR) {
+#else
     while (write(io_wake_fd[1], &a, sizeof a) != sizeof a) {
+#endif
     }
   }
 }
@@ -5755,6 +5859,48 @@ static bool io_bit(u8* set, int fd, bool put) {
 }
 
 static void io_wait(Env e) {
+#ifdef _WIN32
+  fd_set reads, writes;
+  FD_ZERO(&reads);
+  FD_ZERO(&writes);
+  FD_SET(io_wake_fd[0], &reads);
+  u64 soon = 0;
+  for (IoWork* a = io_park; a != NULL;
+    a = a->next != io_park ? a->next : NULL) {
+    if (a->time != 0 && (soon == 0 || a->time < soon)) soon = a->time;
+    if (a->evts == POLLOUT) FD_SET((SOCKET)a->word, &writes);
+    else if (a->evts != 0) FD_SET((SOCKET)a->word, &reads);
+  }
+  u64 tick = io_tick();
+  u64 ms = soon > tick ? (soon - tick + 999999ull) / 1000000ull : 0;
+  struct timeval tv = { (long)(ms / 1000), (long)(ms % 1000 * 1000) };
+  io_sync();
+  if (select(0, &reads, &writes, NULL, soon == 0 ? NULL : &tv)
+    == SOCKET_ERROR) {
+    err_fail("the poller failed");
+  }
+  if (FD_ISSET(io_wake_fd[0], &reads)) io_take(e);
+  u64 now = io_tick();
+  IoWork* todo = io_park;
+  io_park = NULL;
+  while (todo != NULL) {
+    IoWork* a = io_pop(&todo);
+    bool due = (a->evts == POLLOUT
+        && FD_ISSET((SOCKET)a->word, &writes))
+      || (a->evts != 0 && a->evts != POLLOUT
+        && FD_ISSET((SOCKET)a->word, &reads))
+      || (a->time != 0 && a->time <= now);
+    if (!due) {
+      io_park_add(a);
+      continue;
+    }
+    Term x = a->pack(e, a);
+    if (x != IO_PARK) {
+      a->item = x;
+      io_push(&io_runs, a);
+    }
+  }
+#else
   int top  = io_wake_fd[0];
   u64 soon = 0;
   for (IoWork* a = io_park; a != NULL;
@@ -5809,6 +5955,7 @@ static void io_wait(Env e) {
     }
   }
   free(set[0]);
+#endif
 }
 
 ${NATIVE.IO}
@@ -5985,10 +6132,17 @@ static void io_step(Env e, IoWork* a) {
 OUTLINE void io_loop(u64* H) {
   Env e = { H, ALC[0] };
   io_stk = pool_stack();
+#ifdef _WIN32
+  SetUnhandledExceptionFilter(err_exception);
+  if (io_wake_open() != 0) {
+    err_fail("the event loop failed to open");
+  }
+#else
   signal(SIGPIPE, SIG_IGN);
   if (pipe(io_wake_fd) | fcntl(io_wake_fd[0], F_SETFL, O_NONBLOCK)) {
     err_fail("the event loop failed to open");
   }
+#endif
   Term m = corpus_eval(H, term_tsk(MAIN_FID, task_node(e, MAIN_FID,
     TERM_HOLE, 0, 0)));
 #if MAIN_PURE
