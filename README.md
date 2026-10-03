@@ -1,6 +1,6 @@
 # Bend on Windows
 
-This fork adds native Windows support to Bend 2.0.32. It is a preview, not an
+This fork adds native Windows support to Bend 2.0.34. It is a preview, not an
 official Bend distribution. The installer and releases are published from
 `qasimkamran/bend-windows`.
 
@@ -56,11 +56,18 @@ copy, and command shim; it leaves Bun, Lean, and CUDA installed separately.
 
 ## Windows validation
 
-Validated natively on Windows: CPU and JavaScript execution; C file, socket,
-process, and timer effects; imports including Unicode paths; and `--verdict`
-with Lean 4.34.0. CUDA Toolkit 13.4 SDK discovery and compile/link plus the
-no-GPU path passed. CUDA device execution, GPU kernel compilation, GUI/audio
-runtime checks, and the mini-cluster gates were not validated here.
+The 2.0.34 integration was checked natively on Windows x64 with Bun and
+LLVM-MinGW: upstream regressions, base-library and import tests, CPU and JS
+execution, and file, socket, process, channel and timer effects. Process tests
+cover stdout, stderr and combined output limits. The updated Lean 4.34.0
+kernel builds and passes `cong_lambda_argument.bend --verdict`.
 
-Known test limitation: `tests/run/array_fork.bend` reports memory faults on
-Windows both with CUDA enabled and with CUDA disabled. This remains unresolved.
+The array tests, including `array_fork.bend`, pass with four CPU workers and
+`--gpu off`. CUDA Toolkit 13.4 compile/link and CPU fallback also pass. CUDA
+device execution and interactive GUI/audio behavior were not validated.
+
+The mini-cluster hostname is unavailable here. The repository gate has two
+inherited failures: tracked `PLAN.md` is outside its allow list, and `comp.ts`
+exceeds its 64,000-token cap (68,739 before this integration; 68,899 after).
+The allow list and caps are unchanged. TypeScript checking reports the same
+diagnostics as an unmodified upstream 2.0.34 checkout.

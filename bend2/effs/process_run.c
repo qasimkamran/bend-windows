@@ -53,6 +53,7 @@ static void process_free(ProcessCall* p) {
   free(p);
 }
 
+// Windows pipe readers stop when the shared output limit is exceeded.
 static bool process_append(ProcessCall* p, bool error, const char* data,
   u64 size) {
 #ifdef _WIN32
