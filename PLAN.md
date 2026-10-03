@@ -1,72 +1,99 @@
-# Native Windows support: remaining work
+# Bend 2.0.34 Windows fork handoff
 
-This is a handoff for follow-up agents. Read `AGENTS.md` first and preserve its
-constraints. Windows support is implemented across the shared compiler and
-runtimes, but “implemented” does not mean every platform or hardware path has
-been runtime-validated.
+Updated 2026-10-03 for `update/bend-2.0.34`. This replaces the old Windows
+porting checklist. Read `AGENTS.md` first. The integration is committed as
+`67941b37` (parents: fork `7901c190`, upstream v2.0.34 `7d8a3eb0`).
 
 ## Constraints
 
 - Keep Linux behavior and implementations unchanged wherever possible. Reuse
   shared code; do not add Windows-only optimizations or silent stubs.
-- `bend2/bend.ts` is human-written language code and must not be edited. A
-  narrowly authorized import-path fix was already made; do not broaden it.
-- Do not edit repository allow lists or token caps.
-- Keep native Windows runtime results distinct from cross-compilation and
-  compile/link-only results. Do not claim full parity without the relevant
-  runtime checks.
+- `bend2/bend.ts` is human-written language code and must not be edited. The
+  existing, narrowly authorized Windows import-path fix must not be broadened.
+  This integration imported upstream language changes without authoring new
+  language changes; its only difference from upstream is that existing fix.
+- Do not edit repository allow lists or token caps. An over-cap file must be
+  simplified in place, not split into other files to evade its cap.
+- Distinguish native Windows execution, cross-compilation, compile/link checks
+  and actual GPU execution. Do not claim platform parity from build success.
 - Commit at meaningful milestones. Before pushing, inspect branch/upstream.
 
 ## Delivered
 
-- Windows CPU runtime portability and Windows implementations for sockets,
-  process execution, files, randomness, audio, and windows, sharing the
-  existing runtime/effect logic where possible.
-- Windows JS backend IO bindings and effects; focused JS checks ran natively.
-- CLI executable naming, import handling (including Unicode paths), foreign
-  code/build paths, Windows `--verdict` executable handling, and CUDA cache,
-  environment, discovery, and linking paths.
-- A fork-specific Windows preview release and PowerShell installer. The README
-  documents installation and removal. This is not integration with the
-  upstream Bend distribution/site.
-- Installer Preview 2 fixes architecture detection in Windows PowerShell 5.1;
-  validated under PowerShell 5.1 with a disposable install and `bend version`.
-- Native Windows CPU/JS and focused effect checks, plus Windows Lean 4.34.0
-  `--verdict` checks. Linux behavior was compared for available focused cases.
+- Merged upstream v2.0.34, including the v2.0.33 updates: shared-graph
+  conversion, base-library simplifications, U32-to-Nat widening, shared-array
+  redirect and display-layout fixes, effect ID parsing, and the Lean kernel's
+  lambda-argument fix. Upstream regression tests and release notes are included.
+- Preserved the fork's Windows CPU runtime, C and JS effects, CLI executable
+  handling, imports, foreign C/dlfcn support, CUDA paths, and Lean integration.
+- Resolved the process helper conflict by retaining `process_append`'s boolean
+  result: Windows pipe readers use it to stop when the combined output limit
+  is exceeded. Added `tests/io/process_output_limit_bun.bend`, covering stdout,
+  stderr and combined limits while the child would otherwise keep running.
+- Updated README and CHANGELOG for this integration and its validation limits.
+- Preserved the tracked `install.ps1` and its `-Local` branch-commit install
+  behavior. The installer is allowed by the existing repository gate. This
+  branch has not been pushed and no new preview release has been published.
 
-## Remaining work and validation blockers
+## Verified on this branch
 
-1. **CUDA device execution:** CUDA Toolkit 13.4 was installed and Windows
-   CUDA build/link paths were checked without a GPU. Kernel/device execution
-   still needs a compatible NVIDIA GPU and driver. Do not describe SDK-only
-   checks as CUDA runtime validation.
-2. **GUI and audio runtime:** implementations compile, but interactive window
-   and audio behavior has not been validated end-to-end on this machine.
-3. **Windows `array_fork`:** investigate the native Windows memory fault in
-   `tests/run/array_fork.bend`, observed with CUDA both enabled and disabled.
-   Keep this distinct from the CUDA SDK/device blocker.
-4. **Full project gates:** rerun `gates/test.ts`, `gates/safe.ts`, and other
-   applicable gates when mini-cluster DNS is available and `ttok` is installed.
-   Previous gate execution was blocked by cluster DNS; `gates/repo.ts` also
-   could not complete without `ttok`. Do not change gate allow lists or caps.
-   The earlier broad sweep included standalone inputs requiring harness or
-   foreign imports; `select_eintr` and `fifo_eof` are POSIX-specific test
-   sources, not by themselves product compiler failures.
-5. **Upstream distribution:** inspect `../bend-lang.com` before attempting
-   official installer/update integration. It was absent in the prior
-   environment. Do not invent Windows distribution URLs. The fork preview
-   installer is the available distribution path; `bend update` is not an
-   upstream Windows update integration.
+- **Windows x64, Bun and LLVM-MinGW:** 349 distinct local Bend test cases
+  passed across 923 probes. Coverage includes all 123 `tests/compile` cases,
+  all 101 `tests/reg` cases, 77 base-library/import cases, the upstream additions,
+  and focused array and IO cases. Expected output comes from each file's `#|`
+  lines; expected failures and unprintable mains follow the gate's conventions.
+  This is local coverage, not a successful full mini-cluster gate run.
+- **CPU and JS effects:** file, TCP/UDP, process, channel, timer and randomness
+  checks passed, including the new process output-limit regression.
+- **Arrays:** `array_fork.bend` and the selected array suite passed with four
+  CPU workers and `--gpu off`. The old PLAN's memory-fault report was not
+  reproduced in these runs; it is not a verified current failure. This does
+  not establish GPU behavior or exhaustive stress-test stability.
+- **Lean 4.34.0:** the updated kernel built natively and
+  `bun bend2/main.ts tests/proof/cong_lambda_argument.bend --verdict` printed
+  `ALL PROOFS CHECK`.
+- **CUDA Toolkit 13.4:** `spin_array_hold.bend` built and linked with CUDA;
+  its executable printed the expected results with `--gpu off`. With
+  `--gpu on`, it reported no usable GPU. No device execution was validated.
+- **Audio entry points:** `audio_only_open`, `audio_only_write` and
+  `audio_only_close` passed their device-independent paths on C and JS.
+  These tests do not validate sound playback.
+- **Repository gate:** now runnable with locally installed `ttok`; it reports
+  `PASS: 48 / 50`, with the two inherited failures listed below.
+- **TypeScript:** checking the fork and an unmodified upstream v2.0.34 checkout
+  produced the same 12 diagnostics. No new integration diagnostic was found.
+- `git diff --check` passed. Gate rules and caps were not changed.
 
-The installer is published as a release asset, not tracked in the repository,
-because the repository gate does not allow a root `install.ps1` file.
+Local harness, aggregate results and logs are under the ignored
+`.tmp/upgrade-2034/` directory; `validation.json` records the 349 cases.
+These are temporary validation artifacts, not a replacement for project gates.
 
-## Validation notes
+## Remaining work
 
-- Windows native CPU/JS/effect and `--verdict` checks are runtime results.
-- Windows CUDA host compilation/linking is compile-only; no CUDA GPU/driver
-  was available for device execution.
-- Cross-compilation proves only that the target builds, not that it runs on
-  Windows. Record target architecture and compiler for each such result.
-- Native interactive GUI/audio checks and the mini-cluster gates remain
-  outstanding as noted above.
+1. **Repository gate compliance:** `comp.ts` exceeds its unchanged 64,000-token
+   cap: 68,739 before this integration, 68,899 afterward. Substantial in-place
+   simplification is still needed. `PLAN.md` is also tracked outside the allow
+   list. Do not silently expand the allow list or remove this requested handoff;
+   resolve its disposition with the user and repository owner.
+2. **Full project gates:** the `cluster` hostname currently fails to resolve.
+   Run the test, safety, performance and other applicable gates when cluster
+   access and their dependencies are available. Missing `ttok` is no longer
+   the local blocker; the measured repository failures above are real.
+3. **CUDA runtime:** validate device compilation and execution with an accessible,
+   compatible NVIDIA GPU/driver. `nvidia-smi` reported insufficient permissions
+   in this session; do not infer that the machine has no GPU. Cover shared-array
+   redirects, parallel execution and GPU cache behavior on the device.
+4. **Interactive GUI/audio:** exercise windows, input, rendering and audio
+   playback on Windows. Build success and the device-independent audio tests
+   do not establish end-to-end behavior.
+5. **TypeScript diagnostics:** upstream v2.0.34 has existing errors in `bend.ts`,
+   `safe.ts` and documentation generators, including missing `canvas` types and
+   the film's `findLastIndex` library target. Track these separately from the
+   Windows merge. Do not change protected language code to make this check pass.
+6. **Distribution:** if requested, push this branch and prepare a Windows preview
+   release from the tested commit. The existing installer downloads published
+   releases; it does not make this unpublished branch available automatically.
+   Official upstream Windows distribution/update integration is separate work:
+   inspect the site repository before changing it, and do not invent URLs.
+
+The user's pre-existing untracked `test.exe` was left untouched.
